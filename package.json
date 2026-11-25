@@ -1,0 +1,30 @@
+{
+  "name": "chrome-video-scopes",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc --noEmit && vite build && vite build --mode background",
+    "dev": "vite build --watch",
+    "harness": "vite build --mode harness",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify": "node scripts/verify-harness.mjs",
+    "verify:headed": "node scripts/verify-harness.mjs --headed",
+    "verify:e2e": "node scripts/verify-e2e.mjs",
+    "verify:all": "pnpm build && pnpm harness && node scripts/verify-harness.mjs && node scripts/verify-e2e.mjs"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@types/jsdom": "^30.0.0",
+    "@webgpu/types": "^0.1.60",
+    "jsdom": "^31.0.1",
+    "puppeteer-core": "^25.18.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8"
+  }
+}

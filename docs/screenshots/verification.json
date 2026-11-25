@@ -1,0 +1,100 @@
+{
+  "when": "2026-11-25T04:50:36.131Z",
+  "results": [
+    {
+      "name": "page reached steady state",
+      "ok": true,
+      "detail": "src 1280x720 · analysis 640x360 · limited · waveform-luma · bars · 61 fps"
+    },
+    {
+      "name": "analysis size is 640x360 for a 1280x720 source",
+      "ok": true,
+      "detail": "src 1280x720 · analysis 640x360 · limited · waveform-luma · bars · 61 fps"
+    },
+    {
+      "name": "scope renders a signal",
+      "ok": true,
+      "detail": "596 lit px"
+    },
+    {
+      "name": "75% white bar reads 75 IRE (limited)",
+      "ok": true,
+      "detail": "75.2 IRE"
+    },
+    {
+      "name": "75% black bar reads 0 IRE (limited)",
+      "ok": true,
+      "detail": "0.1 IRE"
+    },
+    {
+      "name": "legal black sits above the plot floor (footroom visible)",
+      "ok": true,
+      "detail": "axis=0.0633"
+    },
+    {
+      "name": "grey ramp is monotonic dark -> bright",
+      "ok": true,
+      "detail": "0.063 < 0.522 < 0.924"
+    },
+    {
+      "name": "ramp black end sits at 0 IRE and white end at 100 IRE",
+      "ok": true,
+      "detail": "0.1 .. 100.3 IRE"
+    },
+    {
+      "name": "75% white bar reads 75 IRE (full)",
+      "ok": true,
+      "detail": "75.0 IRE"
+    },
+    {
+      "name": "limited vs full place the same signal differently on the axis",
+      "ok": true,
+      "detail": "limited=0.709 full=0.750"
+    },
+    {
+      "name": "switching IRE -> 8-bit does not move the trace",
+      "ok": true,
+      "detail": "ire=0.7089 code8=0.7089"
+    },
+    {
+      "name": "switching IRE -> nits does not move the trace either",
+      "ok": true,
+      "detail": "ire=0.7089 nits=0.7089"
+    },
+    {
+      "name": "waveform-rgb renders a signal",
+      "ok": true,
+      "detail": "1275 lit px (min 300)"
+    },
+    {
+      "name": "waveform-parade renders a signal",
+      "ok": true,
+      "detail": "596 lit px (min 200)"
+    },
+    {
+      "name": "vectorscope renders a signal",
+      "ok": true,
+      "detail": "189 lit px (min 8)"
+    },
+    {
+      "name": "cie renders a signal",
+      "ok": true,
+      "detail": "183 lit px (min 8)"
+    },
+    {
+      "name": "CIE plot spreads the bars over the diagram (distinct chromaticities)",
+      "ok": true,
+      "detail": "spread=392px over 42 points"
+    },
+    {
+      "name": "low preset shrinks the analysis texture",
+      "ok": true,
+      "detail": "src 1280x720 · analysis 320x180 · limited · waveform-luma · bars · 60 fps"
+    },
+    {
+      "name": "no WebGPU validation errors",
+      "ok": true,
+      "detail": ""
+    }
+  ]
+}
