@@ -26,6 +26,7 @@ import type { AnalysisPreset } from '../gpu/downscale';
 import { Probe, formatSample } from '../ui/probe';
 import { openPipWindow, pipSupported, onPipClosed } from '../ui/pip';
 import { videoReadability, readabilityNotice, type Readability } from './readability';
+import { keepAttached, type Guardian } from './keep-attached';
 
 const HOST_ID = 'video-scopes-host';
 
@@ -60,6 +61,7 @@ let hud: Hud | null = null;
 let controller: ScopeController | null = null;
 let state: HudState = { ...DEFAULT_STATE };
 let unfollowFullscreen: (() => void) | null = null;
+let guardian: Guardian | null = null;
 let probe: Probe | null = null;
 let probedVideo: HTMLVideoElement | null = null;
 let readability: Readability = { kind: 'unknown' };
@@ -306,6 +308,15 @@ function finishEnable(): void {
   try {
     unfollowFullscreen = followFullscreen(hud!.hostElement!);
 
+    // Pages that rebuild their DOM after load (YouTube's hydration) detach the
+    // host as collateral. Re-attach whenever that happens, and report the count
+    // so this failure mode is visible instead of silent.
+    guardian = keepAttached(
+      hud!.hostElement!,
+      () => document.fullscreenElement ?? document.documentElement,
+      (n) => stampTitle('reattached', String(n)),
+    );
+
     buildController();
     stampTitle('controller-ready');
 
@@ -337,6 +348,9 @@ function finishEnable(): void {
   });
   detector.start();
     stampTitle(detector.video ? 'detector-video' : 'detector-novideo');
+    stampGeometry('geo');
+    // Re-measure after layout settles: the first pass can run before styles apply.
+    setTimeout(() => stampGeometry('geo2'), 1500);
     if (!detector.video) hud?.setNotice('No video found on this page.');
   } catch (e) {
     // The panel is already on screen, so report here instead of throwing.
@@ -356,6 +370,8 @@ async function disable(): Promise<void> {
   detector = null;
   controller?.destroy();
   controller = null;
+  guardian?.stop();
+  guardian = null;
   unfollowFullscreen?.();
   unfollowFullscreen = null;
   if (probedVideo && probe) probe.disable(probedVideo);
@@ -381,10 +397,50 @@ function toggle(): void {
  * Reflect state in document.title so the extension's health can be read without
  * a screenshot. Only writes while the HUD exists, and restores on unmount.
  */
-function stampTitle(status: string): void {
+function stampTitle(status: string, extra?: string): void {
   const marker = ' [VS:';
   const base = document.title.replace(/ \[VS:[^\]]*\]$/, '');
-  document.title = `${base}${marker}${status}]`;
+  document.title = `${base}${marker}${status}${extra ? '|' + extra : ''}]`;
+}
+
+/** Dump the panel's geometry into the title so an invisible panel reports why. */
+function stampGeometry(tag: string): void {
+  const h = document.getElementById(HOST_ID);
+  if (!h) {
+    stampTitle(`${tag}-nohost`);
+    return;
+  }
+  const r = h.getBoundingClientRect();
+  const panel = h.shadowRoot?.querySelector('.panel') as HTMLElement | null;
+  const pr = panel?.getBoundingClientRect();
+  const cs = getComputedStyle(h);
+  // A transform/filter/perspective/contain on an ancestor makes fixed
+  // positioning resolve against that ancestor instead of the viewport, which
+  // silently moves the panel. YouTube is known to touch these.
+  const culprits: string[] = [];
+  for (const el of [document.documentElement, document.body]) {
+    if (!el) continue;
+    const s2 = getComputedStyle(el);
+    const why: string[] = [];
+    if (s2.transform !== 'none') why.push('transform=' + s2.transform);
+    if (s2.filter !== 'none') why.push('filter=' + s2.filter);
+    if (s2.perspective !== 'none') why.push('perspective');
+    if (s2.contain !== 'none') why.push('contain=' + s2.contain);
+    if (s2.willChange !== 'auto') why.push('will-change=' + s2.willChange);
+    if (why.length) culprits.push(`${el.tagName.toLowerCase()}:${why.join('+')}`);
+  }
+
+  const bits = [
+    `host=${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}`,
+    `vh=${window.innerHeight}`,
+    `disp=${cs.display}`,
+    `vis=${cs.visibility}`,
+    `zi=${cs.zIndex}`,
+    panel ? `panel=${Math.round(pr!.width)}x${Math.round(pr!.height)}` : 'panel=MISSING',
+    `kids=${h.shadowRoot?.children.length ?? 0}`,
+    culprits.length ? `CONTEXT:${culprits.join(',')}` : 'ctx=clean',
+  ];
+  stampTitle(tag, bits.join(','));
 }
 
 chrome.runtime.onMessage.addListener((msg: { type?: string }) => {
