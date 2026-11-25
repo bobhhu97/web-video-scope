@@ -90,6 +90,7 @@ pnpm verify            # pixel-measured scope checks in real Chrome + WebGPU
 pnpm verify:e2e        # injects the built content script on a live <video>
 pnpm verify:ui         # panel layout: all four counts, geometry, IRE axis (15 checks)
 pnpm verify:scatter    # vectorscope + CIE point clouds and locus curve (12 checks)
+pnpm verify:cie        # CIE 1:1 axes, grid squareness, zoom, cell pickers (12 checks)
 pnpm verify:all        # everything above
 pnpm bench:upload      # compare zero-copy vs copying upload paths
 ```
