@@ -7,7 +7,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc --noEmit && vite build && vite build --mode background",
+    "build": "tsc --noEmit && vite build && vite build --mode background && node scripts/assert-fresh-build.mjs",
     "dev": "vite build --watch",
     "harness": "vite build --mode harness",
     "test": "vitest run",

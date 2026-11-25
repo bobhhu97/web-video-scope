@@ -124,8 +124,9 @@ describe('built content script', () => {
   it('reopens on a second Alt+S', async () => {
     const { win } = await makeEnv();
     await waitFor(() => host(win) !== null);
-    const press = (): void =>
+    const press = (): void => {
       win.dispatchEvent(new win.KeyboardEvent('keydown', { altKey: true, code: 'KeyS' }));
+    };
     press();
     await waitFor(() => host(win) === null);
     press();

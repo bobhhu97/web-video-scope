@@ -1,5 +1,5 @@
 {
-  "when": "2026-11-25T06:34:57.827Z",
+  "when": "2026-11-25T06:40:34.309Z",
   "results": [
     {
       "name": "host page has a playing video with metadata",
@@ -35,7 +35,7 @@
     {
       "name": "perf badge shows a live frame rate",
       "ok": true,
-      "detail": "18 fps · 1.5 ms · 0copy · auto:1"
+      "detail": "1 fps · 5.7 ms · 0copy · auto:1"
     },
     {
       "name": "host is position:fixed with the documented z-index",
@@ -55,12 +55,12 @@
     {
       "name": "zero-copy upload path is in use (no per-frame pixel copy)",
       "ok": true,
-      "detail": "18 fps · 1.5 ms · 0copy · auto:1"
+      "detail": "1 fps · 5.7 ms · 0copy · auto:1"
     },
     {
       "name": "analysis reaches a steady frame rate near the source ceiling",
       "ok": true,
-      "detail": "34 fps · 1.9 ms · 0copy · auto:0"
+      "detail": "33 fps · 1.1 ms · 0copy · auto:0"
     },
     {
       "name": "state persists visible=true to chrome.storage",
@@ -72,9 +72,13 @@
       "ok": true
     },
     {
-      "name": "state persists visible=false after closing",
+      "name": "closing does not persist a hidden state",
       "ok": true,
-      "detail": "false"
+      "detail": "true"
+    },
+    {
+      "name": "panel returns after a reload",
+      "ok": true
     },
     {
       "name": "raw I420 plane mode renders a trace",
@@ -84,7 +88,7 @@
     {
       "name": "raw mode keeps a usable frame rate",
       "ok": true,
-      "detail": "30 fps · 1.9 ms · raw · auto:0"
+      "detail": "33 fps · 3.2 ms · raw · auto:0"
     },
     {
       "name": "Alt + pointer reports a pixel reading",

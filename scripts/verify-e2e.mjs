@@ -260,21 +260,48 @@ try {
   });
   check('HUD unmounts on the second Alt+S', true);
 
+  // Closing must NOT persist a hidden state: a persisted flag is what made a
+  // single close suppress the panel forever. The panel should therefore come
+  // back on the next load.
   const afterOff = await page.evaluate(async () => {
     const store = await chrome.storage.local.get('video-scopes:state');
     return store['video-scopes:state']?.visible;
   });
-  check('state persists visible=false after closing', afterOff === false, String(afterOff));
+  check(
+    'closing does not persist a hidden state',
+    afterOff !== false,
+    String(afterOff),
+  );
+
+  // Simulate a reload and confirm the panel returns. The page needs the
+  // chrome stub and the script re-injected after navigating, exactly as
+  // Chrome would do for a manifest-declared content script.
+  const bundleForReload = readFileSync(resolve(DIST, 'content.js'), 'utf8');
+  await page.reload({ waitUntil: 'networkidle2' });
+  await page.waitForFunction(() => window.__videoReady === true, { timeout: 15000 });
+  await page.evaluate(() => {
+    const store = {};
+    window.chrome = {
+      runtime: { onMessage: { addListener() {} } },
+      storage: { local: { get: async (k) => ({ [k]: store[k] }), set: async (o) => Object.assign(store, o) } },
+    };
+  });
+  await page.evaluate(bundleForReload);
+  const cameBack = await page
+    .waitForFunction(
+      () => !!document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.panel'),
+      { timeout: 12000 },
+    )
+    .then(() => true)
+    .catch(() => false);
+  check('panel returns after a reload', cameBack);
 
   // ---- raw plane mode -----------------------------------------------------
-  // Re-open and switch to the decoder's YUV planes. This path exercises
-  // VideoFrame.copyTo + plane upload, which display mode never touches.
-  await page.keyboard.down('Alt');
-  await page.keyboard.press('KeyS');
-  await page.keyboard.up('Alt');
+  // The reload above re-injected the script, so the panel is already open;
+  // toggling here would close it. Just confirm it is present.
   await page.waitForFunction(
     () => document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.panel') !== null,
-    { timeout: 10000 },
+    { timeout: 12000 },
   );
 
   await page.evaluate(() => {
