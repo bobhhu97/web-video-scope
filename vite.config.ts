@@ -2,6 +2,8 @@ import { defineConfig } from 'vite';
 import { resolve } from 'node:path';
 import { copyFileSync, existsSync } from 'node:fs';
 
+
+
 const copyManifest = {
   name: 'copy-manifest',
   closeBundle(): void {

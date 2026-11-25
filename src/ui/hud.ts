@@ -100,14 +100,23 @@ export class Hud {
     host.id = HOST_ID;
     // `all: initial` MUST come first: it resets every property, so writing it
     // after `position: fixed` silently drops the host back into normal flow.
-    host.style.cssText = 'all:initial;position:fixed;z-index:2147483646;';
-    this.applyPosition();
+    //
+    // The inset values are set here rather than via applyPosition() because
+    // applyPosition() early-returns while `this.host` is still null. A fixed
+    // element with no inset resolves to its *static* position — the end of
+    // documentElement — which on a tall page like YouTube is several screens
+    // below the viewport. That renders the panel but makes it invisible.
+    host.style.cssText =
+      'all:initial;position:fixed;top:16px;right:16px;left:auto;z-index:2147483646;';
 
     const root = host.attachShadow({ mode: 'open' });
     root.innerHTML = this.template();
 
     this.host = host;
     this.root = root;
+    // Assign this.host first, then let the persisted position override the
+    // defaults above.
+    this.applyPosition();
     document.documentElement.appendChild(host);
 
     this.buildCells();

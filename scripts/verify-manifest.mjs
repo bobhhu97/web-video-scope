@@ -48,6 +48,27 @@ for (const f of referenced) {
 const escapes = referenced.filter((f) => f.startsWith('/') || f.includes('..'));
 check('no absolute or traversing paths', escapes.length === 0, escapes.join(',') || 'none');
 
+// ---- content script wiring ---------------------------------------------
+// These two settings are silent failure modes: the extension looks installed
+// and enabled, yet nothing is ever injected.
+const cs0 = (manifest.content_scripts ?? [])[0] ?? {};
+check(
+  'content script runs at document_start or document_end (not idle)',
+  cs0.run_at === 'document_start' || cs0.run_at === 'document_end',
+  String(cs0.run_at),
+);
+
+// The content script must be a self-executing classic script: a bare ESM export
+// would be skipped by Chrome without any error.
+const contentJs = existsSync(join(DIST, 'content.js'))
+  ? readFileSync(join(DIST, 'content.js'), 'utf8')
+  : '';
+check(
+  'content.js is an IIFE with no top-level import/export',
+  /^\(function\s*\(/.test(contentJs.trimStart()) && !/^\s*(import|export)\s/m.test(contentJs),
+);
+check('content.js is non-trivial', contentJs.length > 5000, `${contentJs.length} bytes`);
+
 // ---- CSP / MV3 restrictions ---------------------------------------------
 const scripts = readdirSync(DIST).filter((f) => f.endsWith('.js'));
 for (const file of scripts) {

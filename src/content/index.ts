@@ -29,6 +29,30 @@ import { videoReadability, readabilityNotice, type Readability } from './readabi
 
 const HOST_ID = 'video-scopes-host';
 
+/**
+ * Last-resort visibility. If anything below throws, this leaves a note in the
+ * page so a failure is visible instead of silent. Only shown when something
+ * goes wrong — a healthy run never creates it.
+ */
+function showDiagnostic(kind: 'injected' | 'error', detail: string): void {
+  const id = 'video-scopes-diag';
+  let el = document.getElementById(id);
+  if (!el) {
+    el = document.createElement('div');
+    el.id = id;
+    el.style.cssText =
+      'all:initial;position:fixed;top:8px;left:8px;z-index:2147483647;' +
+      'font:12px/1.5 ui-monospace,monospace;padding:6px 10px;border-radius:6px;' +
+      'max-width:420px;white-space:pre-wrap;' +
+      (kind === 'error'
+        ? 'background:#3a1414;color:#ffb4b4;border:1px solid #ff6b6b'
+        : 'background:#16291d;color:#8cd9a5;border:1px solid #3d6b4a');
+    el.textContent = `Video Scopes [${kind}] ${detail}`;
+    document.documentElement.appendChild(el);
+    setTimeout(() => el?.remove(), 12000);
+  }
+}
+
 let enabled = false;
 let detector: VideoDetector | null = null;
 let loop: FrameLoop | null = null;
@@ -326,8 +350,14 @@ window.addEventListener('keydown', (e) => {
 
 // Restore the previous session automatically.
 void (async () => {
-  const saved = await loadSettings();
-  if (saved.visible) void enable();
+  try {
+    const saved = await loadSettings();
+    if (saved.visible) await enable();
+  } catch (e) {
+    // Content script ran but could not start. Say so on the page.
+    showDiagnostic('error', e instanceof Error ? `${e.name}: ${e.message}` : String(e));
+    throw e;
+  }
 })();
 
 // Keep the panel reachable when the page tears down the DOM it lived in.

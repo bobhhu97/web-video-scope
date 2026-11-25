@@ -44,9 +44,33 @@ async function toggleInTab(tabId: number): Promise<void> {
     // This is the failure the user sees as "clicking does nothing". It happens
     // on protected pages (chrome://, the Web Store, PDF viewer) and on pages
     // where the extension lacks host access.
-    console.error('[video-scopes] injection failed:', String(e));
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[video-scopes] injection failed:', msg);
     await chrome.action.setBadgeText({ tabId, text: '!' }).catch(() => {});
     await chrome.action.setBadgeBackgroundColor({ tabId, color: '#d87f7f' }).catch(() => {});
+
+    // Also write the reason into the page: a silent failure is what makes this
+    // feel like "the extension does nothing".
+    await chrome.scripting
+      .executeScript({
+        target: { tabId },
+        func: (reason: string) => {
+          const id = 'video-scopes-diag';
+          document.getElementById(id)?.remove();
+          const el = document.createElement('div');
+          el.id = id;
+          el.style.cssText =
+            'all:initial;position:fixed;top:8px;left:8px;z-index:2147483647;' +
+            'font:12px/1.5 ui-monospace,monospace;padding:8px 12px;border-radius:6px;' +
+            'max-width:460px;white-space:pre-wrap;background:#3a1414;color:#ffb4b4;' +
+            'border:1px solid #ff6b6b';
+          el.textContent = 'Video Scopes: cannot start on this page.\n' + reason;
+          document.documentElement.appendChild(el);
+          setTimeout(() => el.remove(), 15000);
+        },
+        args: [msg],
+      })
+      .catch(() => {});
     return;
   }
 
