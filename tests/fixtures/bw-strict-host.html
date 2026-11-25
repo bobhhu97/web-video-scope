@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Strict black/white host</title>
+    <style>
+      body { margin: 0; background: #0b0f12; }
+      canvas { display: block; }
+      video { width: 640px; display: block; background: #000; }
+    </style>
+  </head>
+  <body>
+    <canvas id="pattern" width="1280" height="720"></canvas>
+    <video id="video" muted playsinline loop autoplay></video>
+    <script>
+      // ONLY exact 0 and exact 255, with hard edges and no anti-aliasing.
+      // If the scope shows mid-tones for this, the pipeline invented them.
+      const p = document.getElementById('pattern');
+      const ctx = p.getContext('2d', { alpha: false });
+      ctx.imageSmoothingEnabled = false;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, p.width, p.height);
+      ctx.fillStyle = '#fff';
+      // Text-like bars: horizontal and vertical hard edges at many scales.
+      for (let i = 0; i < 9; i++) {
+        const x = 80 + i * 130;
+        ctx.fillRect(x, 260, 70, 14);      // thin horizontal strokes
+        ctx.fillRect(x + 20, 300, 14, 90); // thin vertical strokes
+        ctx.fillRect(x, 430, 46, 46);      // blocks
+      }
+      // One large solid area, like a big title.
+      ctx.fillRect(120, 90, 1040, 90);
+
+      const v = document.getElementById('video');
+      window.__videoReady = false;
+      v.addEventListener('loadedmetadata', () => { window.__videoReady = true; });
+      v.srcObject = p.captureStream(30);
+      v.play().catch(() => {});
+      if (v.readyState >= 1) window.__videoReady = true;
+
+      // Also expose the source so a probe can confirm it really is 0/255 only.
+      window.__pattern = p;
+    </script>
+  </body>
+</html>
