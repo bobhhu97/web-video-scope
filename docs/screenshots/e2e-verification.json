@@ -1,5 +1,5 @@
 {
-  "when": "2026-11-25T06:58:56.901Z",
+  "when": "2026-11-25T07:07:04.187Z",
   "results": [
     {
       "name": "host page has a playing video with metadata",
@@ -39,7 +39,7 @@
     {
       "name": "perf badge shows a live frame rate",
       "ok": true,
-      "detail": "16 fps · 1.9 ms · 0copy · auto:1"
+      "detail": "17 fps · 1.2 ms · 0copy · auto:1"
     },
     {
       "name": "host is position:fixed with the documented z-index",
@@ -59,12 +59,12 @@
     {
       "name": "zero-copy upload path is in use (no per-frame pixel copy)",
       "ok": true,
-      "detail": "16 fps · 1.9 ms · 0copy · auto:1"
+      "detail": "17 fps · 1.2 ms · 0copy · auto:1"
     },
     {
       "name": "analysis reaches a steady frame rate near the source ceiling",
       "ok": true,
-      "detail": "34 fps · 1.7 ms · 0copy · auto:0"
+      "detail": "29 fps · 1.6 ms · 0copy · auto:0"
     },
     {
       "name": "state persists visible=true to chrome.storage",
@@ -96,7 +96,7 @@
     {
       "name": "raw mode keeps a usable frame rate",
       "ok": true,
-      "detail": "33 fps · 1.6 ms · raw · auto:0"
+      "detail": "34 fps · 1.2 ms · raw · auto:0"
     },
     {
       "name": "Alt + pointer reports a pixel reading",

@@ -68,6 +68,41 @@ try {
   const page = await browser.newPage();
   await page.setViewport({ width: 1400, height: 950 });
 
+  /**
+   * The HUD may live in the page OR in a Document PiP window, since the icon and
+   * the shortcut both prefer the floating window. Tests must not care which.
+   */
+  async function panelContext() {
+    const inPage = await page.evaluate(
+      () => !!document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.panel'),
+    );
+    if (inPage) return { target: page, where: 'page' };
+    for (const t of browser.targets()) {
+      if (t.type() !== 'page' || t === page.target() || !t.url().startsWith('about:blank')) continue;
+      try {
+        const p2 = await t.page();
+        const ok = await p2.evaluate(
+          () => !!document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.panel'),
+        );
+        if (ok) return { target: p2, where: 'window' };
+      } catch {
+        /* still initialising */
+      }
+    }
+    return null;
+  }
+
+  /** Wait until the HUD exists anywhere, then return that context. */
+  async function waitPanel(timeoutMs = 15000) {
+    const end = Date.now() + timeoutMs;
+    while (Date.now() < end) {
+      const ctx = await panelContext();
+      if (ctx) return ctx;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return null;
+  }
+
   const errors = [];
   page.on('console', (m) => {
     const t = m.text();
@@ -91,7 +126,13 @@ try {
     };
   });
 
-  await page.goto(`http://127.0.0.1:${PORT}/fixtures/content-host.html`, { waitUntil: 'networkidle2' });
+  // `?vsInline=1` asks the panel to stay in the page. This suite measures
+  // geometry, canvas pixels and pointer probing against the page, all of which
+  // are unambiguous only when the HUD is in the page; the floating window is
+  // covered separately by verify-floating.mjs.
+  await page.goto(`http://127.0.0.1:${PORT}/fixtures/content-host.html?vsInline=1`, {
+    waitUntil: 'networkidle2',
+  });
   await page.waitForFunction(() => window.__videoReady === true, { timeout: 15000 });
   check('host page has a playing video with metadata', true);
 

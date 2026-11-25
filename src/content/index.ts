@@ -24,7 +24,7 @@ import { GpuTimer } from '../core/gpu-timer';
 import { getDevice } from '../gpu/device';
 import type { AnalysisPreset } from '../gpu/downscale';
 import { Probe, formatSample } from '../ui/probe';
-import { openPipWindow, pipSupported, onPipClosed } from '../ui/pip';
+import { openFloatingWindow, returnToPage, pipSupported, type PiPHost } from '../ui/pip';
 import { videoReadability, readabilityNotice, type Readability } from './readability';
 import { keepAttached, type Guardian } from './keep-attached';
 
@@ -63,6 +63,8 @@ let state: HudState = { ...DEFAULT_STATE };
 let unfollowFullscreen: (() => void) | null = null;
 let guardian: Guardian | null = null;
 let reattachCount = 0;
+let lastDisableReason = 'none';
+let floating: PiPHost | null = null;
 let probe: Probe | null = null;
 let probedVideo: HTMLVideoElement | null = null;
 let readability: Readability = { kind: 'unknown' };
@@ -281,23 +283,7 @@ function buildHud(): Hud {
       void disable();
     },
     onOpenPip() {
-      const host = document.getElementById(HOST_ID);
-      if (!host) return;
-      if (!pipSupported()) {
-        hud?.setNotice('Picture-in-Picture needs Chrome 116+.');
-        return;
-      }
-      void (async () => {
-        try {
-          const win = await openPipWindow(host);
-          // While detached, fullscreen tracking would yank the host back.
-          unfollowFullscreen?.();
-          unfollowFullscreen = null;
-          onPipClosed(win, host, document.documentElement);
-        } catch (e) {
-          hud?.setNotice(`PiP failed: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      })();
+      void detachToFloatingWindow();
     },
     onToggleLock() {
       const locked = state.lockedTier === null;
@@ -400,6 +386,18 @@ function finishEnable(): void {
 
 async function disable(): Promise<void> {
   if (!enabled) return;
+  // Record the caller: a close the user asked for and one triggered by our own
+  // recovery path look identical otherwise.
+  const who = (new Error().stack ?? '')
+    .split('\n')
+    .slice(1, 4)
+    .map((l) => l.trim().replace(/^at\s+/, '').split(' ')[0])
+    .join('<');
+  try {
+    lastDisableReason = who;
+  } catch {
+    // ignore
+  }
   enabled = false;
   loop?.stop();
   loop = null;
@@ -407,6 +405,8 @@ async function disable(): Promise<void> {
   detector = null;
   controller?.destroy();
   controller = null;
+  floating?.close();
+  floating = null;
   guardian?.stop();
   guardian = null;
   unfollowFullscreen?.();
@@ -499,24 +499,84 @@ chrome.runtime.onMessage.addListener((msg: { type?: string }) => {
  */
 function ensureVisible(): void {
   if (!enabled) {
-    void enable();
+    // Enable first, then detach: the HUD must be mounted before it can move.
+    void enable().then(() => detachToFloatingWindow());
+    return;
+  }
+  if (floating?.isOpen()) {
+    floating.window.focus();
     return;
   }
   const host = document.getElementById(HOST_ID);
   if (!host) {
-    // Mounted state lost (page rebuild, HUD unmount): rebuild from scratch.
-    void disable().then(() => enable());
+    void disable().then(() => enable().then(() => detachToFloatingWindow()));
     return;
   }
-  guardian?.reattach();
-  host.style.zIndex = '2147483646';
-  stampGeometry('ensured');
+  // Prefer the floating window: it is immune to the page's DOM surgery,
+  // stacking contexts and z-index wars, which is what kept making the in-page
+  // panel invisible.
+  void detachToFloatingWindow();
+}
+
+/**
+ * Move the panel into an always-on-top window. Falls back to keeping it in the
+ * page (and says so) when the API is unavailable.
+ */
+async function detachToFloatingWindow(): Promise<void> {
+  const host = document.getElementById(HOST_ID);
+  if (!host) return;
+  if (floating?.isOpen()) {
+    floating.window.focus();
+    return;
+  }
+  if (!pipSupported()) {
+    hud?.setNotice('Floating window needs Chrome 116+. Panel shown in page.');
+    guardian?.reattach();
+    host.style.zIndex = '2147483646';
+    return;
+  }
+  try {
+    // Fullscreen tracking would drag the host back into the page; stop it while
+    // the panel lives outside.
+    unfollowFullscreen?.();
+    unfollowFullscreen = null;
+    guardian?.stop();
+    guardian = null;
+
+    floating = await openFloatingWindow(host, {
+      width: Math.min(900, Math.round(window.screen.availWidth * 0.5)),
+      height: Math.min(640, Math.round(window.screen.availHeight * 0.7)),
+      onClosed: () => {
+        floating = null;
+        // Put it back where it can be found again.
+        const h = document.getElementById(HOST_ID);
+        if (h && enabled) {
+          returnToPage(h, document.documentElement);
+          guardian = keepAttached(h, () => document.documentElement, (n) => {
+            reattachCount = n;
+          });
+          stampGeometry('returned');
+        }
+      },
+    });
+    stampTitle('floating');
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    hud?.setNotice(`Floating window failed: ${msg}`);
+    guardian?.reattach();
+    host.style.zIndex = '2147483646';
+  }
 }
 
 window.addEventListener('keydown', (e) => {
   if (e.altKey && e.code === 'KeyS') {
     e.preventDefault();
-    toggle();
+    // Same path as the toolbar icon, so the shortcut and the icon always agree.
+    if (enabled) {
+      void disable();
+    } else {
+      ensureVisible();
+    }
   }
 });
 
