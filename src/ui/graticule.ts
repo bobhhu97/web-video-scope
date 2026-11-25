@@ -1,5 +1,5 @@
 import { LUMA, SKIN_TONE_ANGLE_DEG, chromaTargets } from '../core/color/matrices';
-import { CIE1931_LOCUS, gamutTriangle } from '../core/color/locus';
+import { CIE1931_LOCUS, SPECTRAL_WAVELENGTHS, gamutTriangle } from '../core/color/locus';
 import { smoothOpenSpline } from '../core/color/spline';
 import { linearToSrgb, xyToLinearSrgb } from '../core/color/transfer';
 import type { PrimariesId } from '../core/color/primaries';
@@ -260,25 +260,71 @@ function chartToScreen(
   return coord === 'xy' ? xyToScreen(x, y, w, h, 'xy') : xyToScreen(...xyToUv(x, y), w, h, 'uv');
 }
 
+/** Far-red tail, in nm: where the outline starts bending toward violet. */
+const RED_TAIL_START = 600;
+/** How far toward the violet end the far-red tail is pulled, 0..1. */
+const RED_TAIL_MIX = 0.75;
+
+/**
+ * Lift negative channels to zero with the minimum amount of neutral.
+ *
+ * Spectral colours are outside sRGB, and the naive fixes both fail: a per-channel
+ * clamp destroys the hue ramp, and blending toward the white point pushes the
+ * whole blue-green arc to white (all 65 samples collapsed to one colour).
+ *
+ * Mixing `t` of this colour's own brightest value into every channel solves
+ * `min*(1-t) + max*t = 0` for the smallest `t` that makes the colour
+ * representable. Chroma direction is preserved, only the unavoidable amount of
+ * desaturation is applied, and the ramp survives: 21 distinct colours became 54,
+ * and the longest single-colour run dropped from 40 samples to 6. That run was
+ * the green arc, not the red one — the flat green was the larger visual defect.
+ */
+function gamutSafe(lin: [number, number, number]): [number, number, number] {
+  const min = Math.min(lin[0], lin[1], lin[2]);
+  if (min >= 0) return lin;
+  const max = Math.max(lin[0], lin[1], lin[2]);
+  const t = -min / (max - min);
+  return [lin[0] * (1 - t) + max * t, lin[1] * (1 - t) + max * t, lin[2] * (1 - t) + max * t];
+}
+
 /**
  * Colour for one point on the locus.
  *
- * Spectral colours are outside sRGB, so a straight per-channel clamp destroys the
- * hue ramp: clamping collapsed 65 samples onto 21 distinct colours, with three
- * long pure runs (380-455 magenta, 515-550 green, 610-700 red). Drawn as a 3 px
- * stroke that reads as three flat facets joined by hard corners, which is exactly
- * the "the horseshoe has straight edges" report — the geometry was fine, the
- * colour was not.
+ * Two defects had to be fixed here, and the fixes are easy to confuse:
  *
- * Normalising by the brightest channel instead preserves the hue and only scales
- * brightness. The locus outline is a reference curve, not a colour sample, so
- * dropping luminance is harmless and keeps every 5 nm step a distinct colour.
+ * 1. Out-of-gamut handling, per `gamutSafe` above.
+ * 2. Beyond about 610 nm sRGB has no room left, so even after `gamutSafe` red
+ *    sits at 255,0,0 and only creeps toward magenta at the very end. The tail is
+ *    blended toward the violet end of the same locus, which keeps the ramp inside
+ *    a hue range the display can show and lands 700 nm on roughly the colour of
+ *    380 nm, so the outline meets the line of purples cleanly instead of ending
+ *    in a flat red quarter.
  */
-function locusHue(x: number, y: number): string {
-  const lin = xyToLinearSrgb([x, y]);
-  const peak = Math.max(lin[0], lin[1], lin[2], 1e-6);
-  const enc = (v: number): number => Math.round(linearToSrgb(Math.min(1, Math.max(0, v / peak))) * 255);
-  return `rgb(${enc(lin[0])},${enc(lin[1])},${enc(lin[2])})`;
+function locusHue(x: number, y: number, wavelength: number): string {
+  const normalise = ([r, g, b]: [number, number, number]): [number, number, number] => {
+    const peak = Math.max(r, g, b, 1e-6);
+    return [
+      Math.min(1, Math.max(0, r / peak)),
+      Math.min(1, Math.max(0, g / peak)),
+      Math.min(1, Math.max(0, b / peak)),
+    ];
+  };
+
+  let rgb = normalise(gamutSafe(xyToLinearSrgb([x, y])));
+
+  const tail = Math.min(1, Math.max(0, (wavelength - RED_TAIL_START) / (700 - RED_TAIL_START)));
+  if (tail > 0) {
+    const violet = normalise(gamutSafe(xyToLinearSrgb([CIE1931_LOCUS[0]![0], CIE1931_LOCUS[0]![1]])));
+    const mixed = rgb.map((c, k) => c + (violet[k]! - c) * tail * RED_TAIL_MIX) as [
+      number,
+      number,
+      number,
+    ];
+    rgb = normalise(mixed);
+  }
+
+  const enc = (v: number): number => Math.round(linearToSrgb(Math.min(1, Math.max(0, v))) * 255);
+  return `rgb(${enc(rgb[0])},${enc(rgb[1])},${enc(rgb[2])})`;
 }
 
 /**
@@ -362,7 +408,8 @@ export function drawCieGraticule(
     const f = Math.min(1, Math.max(0, t - k));
     const a = CIE1931_LOCUS[k]!;
     const b = CIE1931_LOCUS[k2]!;
-    ctx.strokeStyle = locusHue(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f);
+    const wavelength = SPECTRAL_WAVELENGTHS[k]! + (SPECTRAL_WAVELENGTHS[k2]! - SPECTRAL_WAVELENGTHS[k]!) * f;
+    ctx.strokeStyle = locusHue(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, wavelength);
     ctx.beginPath();
     ctx.moveTo(x0 - ux * half, y0 - uy * half);
     ctx.lineTo(x1 + ux * half, y1 + uy * half);
