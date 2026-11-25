@@ -60,13 +60,70 @@ for (const file of scripts) {
   check(`${file}: no import() of a remote URL`, !/import\s*\(\s*["']https?:/.test(code));
 }
 
-// ---- permissions are minimal --------------------------------------------
+// ---- permissions are minimal AND justified -------------------------------
+// Every permission below has code that calls it; anything else is a surprise.
 const perms = manifest.permissions ?? [];
-const expected = ['activeTab', 'scripting', 'storage'];
-const unexpected = perms.filter((p) => !expected.includes(p) && p !== 'tabCapture' && p !== 'offscreen');
+const JUSTIFIED = {
+  activeTab: 'action click grants temporary access to the current tab',
+  scripting: 'injects content.js into tabs that predate the install',
+  storage: 'persists HUD settings (units, layout, quality tier)',
+  tabCapture: 'brokers a stream id for cross-origin video a content script cannot read',
+};
+const unexpected = perms.filter((p) => !(p in JUSTIFIED));
 check('no unrequested permissions', unexpected.length === 0, perms.join(','));
+
+// A permission with no matching call is dead weight that store review will ask
+// about. Verify each one is actually used somewhere in the bundle.
+const bundleText = scripts.map((f) => readFileSync(join(DIST, f), 'utf8')).join('\n');
+const API_FOR = {
+  activeTab: null, // granted implicitly, no API surface
+  scripting: 'chrome.scripting',
+  storage: 'chrome.storage',
+  tabCapture: 'chrome.tabCapture',
+};
+for (const [perm, api] of Object.entries(API_FOR)) {
+  if (!api || !perms.includes(perm)) continue;
+  check(`permission "${perm}" is used (${api})`, bundleText.includes(api));
+}
 check('host_permissions are scoped or absent', !manifest.host_permissions || manifest.host_permissions.every((h) => h !== '<all_urls>' || perms.includes('declarativeNetRequestWithHostAccess')),
   JSON.stringify(manifest.host_permissions ?? 'none'));
+
+// ---- extension-specific rules from the chrome-extensions skill -----------
+// Icons: only reference files that exist. Omitted is fine (Chrome defaults).
+const iconRefs = [
+  ...Object.values(manifest.icons ?? {}),
+  ...(manifest.action?.default_icon ? Object.values(manifest.action.default_icon) : []),
+];
+if (iconRefs.length === 0) {
+  check('icons omitted rather than referenced but missing', true, 'Chrome default icon');
+} else {
+  const missing = iconRefs.filter((f) => !existsSync(join(DIST, f)));
+  check('every referenced icon file exists', missing.length === 0, missing.join(','));
+}
+
+// chrome.action.* requires an "action" key in the manifest.
+check(
+  'action key present (required by chrome.action.*)',
+  'action' in manifest,
+  JSON.stringify(manifest.action ?? null),
+);
+
+// Content scripts must not be declared in all frames unless justified: the
+// panel would appear once per iframe on sites with embedded players.
+const csList = manifest.content_scripts ?? [];
+check(
+  'no content script runs in every frame',
+  csList.every((c) => c.all_frames !== true),
+  csList.map((c) => String(c.all_frames)).join(','),
+);
+
+// No inline scripts or handlers in any packaged HTML.
+const htmlFiles = readdirSync(DIST).filter((f) => f.endsWith('.html'));
+for (const file of htmlFiles) {
+  const html = readFileSync(join(DIST, file), 'utf8');
+  check(`${file}: no inline <script> body`, !/<script(?![^>]*\bsrc=)[^>]*>[^<]+<\/script>/.test(html));
+  check(`${file}: no on*= inline handler`, !/\son\w+\s*=\s*["']/i.test(html));
+}
 
 // ---- content script match coverage --------------------------------------
 const matches = (manifest.content_scripts ?? []).flatMap((cs) => cs.matches ?? []);

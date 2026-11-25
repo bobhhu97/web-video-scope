@@ -53,6 +53,8 @@ export interface AnalysisTexture {
 export class Downscaler implements AnalysisTexture {
   readonly device: GPUDevice;
   private pipeline: GPURenderPipeline;
+  /** Zero-copy variant: samples a texture_external instead of an rgba8 copy. */
+  private externalPipeline: GPURenderPipeline | null = null;
   private sampler: GPUSampler;
   readonly texture: GPUTexture;
   readonly width: number;
@@ -73,6 +75,53 @@ export class Downscaler implements AnalysisTexture {
     // this back into point sampling and reintroduce aliasing.
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.texture = this.createTarget(width, height);
+  }
+
+  /**
+   * Install the zero-copy pipeline. Kept separate from the constructor so the
+   * copy path still works if external-texture support is missing.
+   */
+  enableExternalPath(code: string): void {
+    const module = this.device.createShaderModule({ code });
+    this.externalPipeline = this.device.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module, entryPoint: 'vs' },
+      fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] },
+      primitive: { topology: 'triangle-list' },
+    });
+  }
+
+  get hasExternalPath(): boolean {
+    return this.externalPipeline !== null;
+  }
+
+  /**
+   * Zero-copy: sample an imported video texture straight into the analysis
+   * texture. Saves the full-resolution copy entirely.
+   */
+  runExternal(encoder: GPUCommandEncoder, external: GPUExternalTexture): void {
+    if (!this.externalPipeline) throw new Error('external path not enabled');
+    const bind = this.device.createBindGroup({
+      layout: this.externalPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: external },
+        { binding: 1, resource: this.sampler },
+      ],
+    });
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: this.texture.createView(),
+          loadOp: 'clear',
+          storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        },
+      ],
+    });
+    pass.setPipeline(this.externalPipeline);
+    pass.setBindGroup(0, bind);
+    pass.draw(3);
+    pass.end();
   }
 
   private createTarget(w: number, h: number): GPUTexture {

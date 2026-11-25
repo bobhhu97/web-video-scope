@@ -29,13 +29,18 @@
         ctx.fillRect(Math.round((i * pattern.width) / steps), 0, Math.ceil(pattern.width / steps), pattern.height);
       }
       const video = document.getElementById('video');
-      video.srcObject = pattern.captureStream(30);
-      video.play().catch(() => {});
-      // Expose a readiness flag for the E2E script.
+      // Set the flag BEFORE assigning the stream: with a fast captureStream the
+      // metadata event can fire before a listener registered afterwards, which
+      // left the flag stuck at false and hung the E2E wait.
+      window.__videoReady = false;
       video.addEventListener('loadedmetadata', () => {
         window.__videoReady = true;
       });
-      window.__videoReady = false;
+      video.srcObject = pattern.captureStream(30);
+      video.play().catch(() => {});
+      // Belt and braces: also set it if metadata is already available by the
+      // time the listener is attached.
+      if (video.readyState >= 1) window.__videoReady = true;
     </script>
   </body>
 </html>

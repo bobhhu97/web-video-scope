@@ -175,12 +175,20 @@ export class Hud {
     }
   }
 
-  setPerf(fps: number, gpuMs: number | null, tier: QualityTier): void {
+  setPerf(
+    fps: number,
+    gpuMs: number | null,
+    tier: QualityTier,
+    upload?: 'external' | 'copy' | 'raw',
+  ): void {
     const el = this.root?.getElementById('perf');
     if (!el) return;
     const locked = this.state.lockedTier !== null;
     const parts = [`${Math.round(fps)} fps`];
     if (gpuMs !== null) parts.push(`${gpuMs.toFixed(1)} ms`);
+    // `0copy` means the frame never left the GPU; `copy` means it was uploaded.
+    if (upload === 'external') parts.push('0copy');
+    else if (upload) parts.push(upload);
     parts.push(locked ? `lock:${tier}` : `auto:${tier}`);
     el.textContent = parts.join(' · ');
     el.className = `badge ${locked ? 'locked' : ''}`;

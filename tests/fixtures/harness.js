@@ -1,4 +1,4 @@
-import { initCanvas, configureCanvas, SignalTexture, Downscaler, analysisSize, ScopeRenderer, DEFAULT_SCOPE_OPTIONS, drawGraticule, DOWNSCALE_WGSL } from './gpu/harness-bundle.js';
+import { initCanvas, configureCanvas, SignalTexture, Downscaler, analysisSize, ScopeRenderer, DEFAULT_SCOPE_OPTIONS, drawGraticule, DOWNSCALE_WGSL } from '/gpu/harness-bundle.js';
 
 const params = new URLSearchParams(location.search);
 const limited = params.get('range') !== 'full';

@@ -15,6 +15,9 @@ import { readFile } from 'node:fs/promises';
 
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const DIST = resolve('dist');
+// The host page lives outside dist/ so it is not shipped in the extension
+// package; the server serves it from tests/fixtures/.
+const FIXTURES = resolve('tests/fixtures');
 const OUT = resolve('docs/screenshots');
 const PORT = 4181;
 mkdirSync(OUT, { recursive: true });
@@ -23,8 +26,14 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
 
 const server = createServer(async (req, res) => {
   try {
-    const path = join(DIST, decodeURIComponent(new URL(req.url ?? '/', 'http://x').pathname));
-    if (!path.startsWith(DIST)) {
+    const urlPath = decodeURIComponent(new URL(req.url ?? '/', 'http://x').pathname);
+    const isFixture = urlPath.startsWith('/fixtures/');
+    const root = isFixture ? FIXTURES : DIST;
+    const rel = isFixture ? urlPath.slice('/fixtures'.length) : urlPath;
+    const path = join(root, rel);
+    // Guard against traversal by checking against the ROOT actually used, not
+    // always DIST: the old check rejected every fixture request with a 403.
+    if (!path.startsWith(root)) {
       res.writeHead(403).end();
       return;
     }
@@ -82,7 +91,7 @@ try {
     };
   });
 
-  await page.goto(`http://127.0.0.1:${PORT}/content-host.html`, { waitUntil: 'networkidle2' });
+  await page.goto(`http://127.0.0.1:${PORT}/fixtures/content-host.html`, { waitUntil: 'networkidle2' });
   await page.waitForFunction(() => window.__videoReady === true, { timeout: 15000 });
   check('host page has a playing video with metadata', true);
 
@@ -191,6 +200,16 @@ try {
     JSON.stringify(info.canvases));
 
   check('a scope canvas contains a rendered trace', litPixels > 200, `${litPixels} lit px`);
+
+  const perfText = await page.evaluate(() => {
+    const root = document.getElementById('video-scopes-host')?.shadowRoot;
+    return root?.getElementById('perf')?.textContent ?? '';
+  });
+  check(
+    'zero-copy upload path is in use (no per-frame pixel copy)',
+    /0copy/.test(perfText),
+    perfText,
+  );
 
   // Saving must persist the visible flag so the panel comes back on reload.
   const persisted = await page.evaluate(async () => {

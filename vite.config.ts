@@ -20,16 +20,20 @@ export default defineConfig(({ mode }) => {
     // `build.lib` is required: a plain rollupOptions entry with only
     // re-exports gets its exports tree-shaken away (preserveEntrySignatures
     // defaults to false), producing an empty bundle.
+    //
+    // Emitted to .harness/ rather than dist/ so that dist/ stays a clean,
+    // shippable extension package (the store build must not contain the test
+    // harness or its bundle).
     return {
       build: {
-        outDir: 'dist',
-        emptyOutDir: false,
+        outDir: '.harness',
+        emptyOutDir: true,
         target: 'chrome121',
         minify: false,
         lib: {
           entry: resolve(__dirname, 'src/harness-entry.ts'),
           formats: ['es'],
-          fileName: () => 'gpu/harness-bundle.js',
+          fileName: () => 'harness-bundle.js',
         },
       },
       publicDir: false,

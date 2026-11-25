@@ -19,6 +19,9 @@ import { readFile } from 'node:fs/promises';
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const OUT = resolve('docs/screenshots');
 const DIST = resolve('dist');
+// The harness page lives outside dist/ so it never ships in the extension.
+const FIXTURES = resolve('tests/fixtures');
+const HARNESS = resolve('.harness');
 const PORT = Number(process.env.HARNESS_PORT ?? 4173);
 mkdirSync(OUT, { recursive: true });
 
@@ -34,8 +37,16 @@ const MIME = {
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? '/', 'http://localhost');
-    const path = join(DIST, decodeURIComponent(url.pathname));
-    if (!path.startsWith(DIST)) {
+    const p0 = decodeURIComponent(url.pathname);
+    // /fixtures/* -> the test page; /gpu/* -> the harness bundle; everything
+    // else -> the extension build. This keeps the store package free of test
+    // tooling while still letting the page import the bundle.
+    const isFixture = p0.startsWith('/fixtures/');
+    const isHarness = p0.startsWith('/gpu/');
+    const root = isFixture ? FIXTURES : isHarness ? HARNESS : DIST;
+    const rel = isFixture ? p0.slice('/fixtures'.length) : isHarness ? p0.slice('/gpu'.length) : p0;
+    const path = join(root, rel);
+    if (!path.startsWith(root)) {
       res.writeHead(403).end();
       return;
     }
@@ -81,7 +92,7 @@ try {
   page.on('pageerror', (e) => pageErrors.push(e.message));
 
   async function load(query) {
-    await page.goto(`${BASE}/test-harness.html?${query}`, { waitUntil: 'networkidle2' });
+    await page.goto(`${BASE}/fixtures/test-harness.html?${query}`, { waitUntil: 'networkidle2' });
     try {
       await page.waitForFunction(
         () => {

@@ -14,20 +14,19 @@ export class GpuTimer {
   private inFlight = false;
   private last: number | null = null;
 
-  sample(device: GPUDevice): Promise<number | null> {
-    if (this.inFlight) return Promise.resolve(null);
+  async sample(device: GPUDevice): Promise<number | null> {
+    if (this.inFlight) return null;
     this.inFlight = true;
     const start = performance.now();
-    return device.queue
-      .onSubmittedWorkDone()
-      .then(() => {
-        this.last = performance.now() - start;
-        return this.last;
-      })
-      .catch(() => null)
-      .finally(() => {
-        this.inFlight = false;
-      });
+    try {
+      await device.queue.onSubmittedWorkDone();
+      this.last = performance.now() - start;
+      return this.last;
+    } catch {
+      return null;
+    } finally {
+      this.inFlight = false;
+    }
   }
 
   get lastMs(): number | null {

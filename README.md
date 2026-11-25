@@ -55,7 +55,13 @@ warning after 3 consecutive frames. You can override with the `range` selector.
 
 Smoothness is the first constraint; precision is a dial.
 
-- **Fixed analysis resolution.** Every frame is downscaled once to 640×360
+- **Zero-copy upload.** Video frames reach the GPU via `importExternalTexture`,
+  which hands over a handle to the decoder's own surface instead of copying
+  pixels. Measured at 1280×720: **0.10 ms/frame and 0 bytes moved**, against
+  0.80 ms and 3.7 MB for a full-resolution copy — an 8× reduction in the upload
+  step alone. The copy path remains as a fallback for cross-origin video, where
+  import throws a `SecurityError`.
+- **Fixed analysis resolution.** Frames are downscaled once to 640×360
   (long edge), shared by all scopes. Cost is therefore independent of source
   resolution: a 4K source costs 2.8% of a full-resolution pass.
 - **Frame-driven.** `requestVideoFrameCallback` means the scopes advance when the
@@ -64,17 +70,26 @@ Smoothness is the first constraint; precision is a dial.
   Sustained overshoot walks down five tiers (60 fps/4 panels → 15 fps/1 panel);
   a catastrophic frame skips two. Recovery requires 60 stable frames so the
   display does not oscillate. Click the badge to pin the current tier.
-- Measured on a 1080p30 source with all four panels open: ~32 fps, ~1.6 ms GPU.
+- Measured on a 1080p30 source with all four panels open: ~30 fps, ~1.7 ms GPU,
+  zero-copy upload confirmed. Raw-plane mode reaches ~34 fps at ~1.7 ms.
+
+All of the above runs on the GPU through WebGPU, which on macOS is backed by
+Metal. There is no separate Metal integration to add: `importExternalTexture`,
+the compute gathers and the resolve passes are already Metal work. The
+`--use-angle=metal` flag in the verification scripts only affects how the test
+harness draws its own 2D canvas; it has no bearing on the scope pipeline.
 
 ## Development
 
 ```bash
 pnpm test              # unit tests (vitest)
 pnpm build             # production bundle
-pnpm verify:manifest   # manifest + CSP + bundle integrity
+pnpm icons             # regenerate icons from scripts/make-icons.mjs
+pnpm verify:manifest   # manifest + CSP + bundle integrity (36 checks)
 pnpm verify            # pixel-measured scope checks in real Chrome + WebGPU
 pnpm verify:e2e        # injects the built content script on a live <video>
 pnpm verify:all        # everything above
+pnpm bench:upload      # compare zero-copy vs copying upload paths
 ```
 
 The two browser suites drive real Chrome over WebGPU and assert on measured
@@ -105,6 +120,12 @@ known patterns through `captureStream` and accepts `?range=`, `?units=`,
    to three panels, at tier 4 to one. Preferring a readable video over a fourth
    scope is intentional; pin a tier to opt out.
 
+## Publishing
+
+`CHROMEWEBSTORE.md` holds the store listing text, the justification for every
+permission, the privacy disclosure answers and the pre-submission checklist.
+`docs/privacy-policy.md` is the policy to publish alongside it.
+
 ## Architecture
 
 ```
@@ -123,7 +144,9 @@ core (pure, unit tested)
 └── scopes/reference  CPU kernels that serve as the GPU oracle
 
 gpu
-├── downscale.wgsl   source -> fixed analysis texture
+├── external-source  importExternalTexture wrapper (zero-copy upload)
+├── downscale-external.wgsl  external texture -> fixed analysis texture
+├── downscale.wgsl   copied source -> fixed analysis texture (fallback)
 ├── accumulate.wgsl  compute: pixel -> atomic density bins
 └── resolve.wgsl     phosphor transfer + composite to a transparent canvas
 ```

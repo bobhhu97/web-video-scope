@@ -143,7 +143,7 @@ async function onFrameSubmitted(): Promise<void> {
   const now = performance.now();
   if (now - lastPerfAt > 500) {
     const fps = (frameCount * 1000) / (now - lastPerfAt);
-    hud?.setPerf(fps, timer.lastMs, currentTier());
+    hud?.setPerf(fps, timer.lastMs, currentTier(), controller?.uploadPath);
     const dims = controller?.analysisDims;
     if (dims) hud?.setNotice(null);
     frameCount = 0;
@@ -232,14 +232,17 @@ async function enable(): Promise<void> {
         hud?.setNotice('Picture-in-Picture needs Chrome 116+.');
         return;
       }
-      openPipWindow(host)
-        .then((win) => {
-          // Stop following fullscreen while detached, then resume on close.
+      void (async () => {
+        try {
+          const win = await openPipWindow(host);
+          // While detached, fullscreen tracking would yank the host back.
           unfollowFullscreen?.();
           unfollowFullscreen = null;
           onPipClosed(win, host, document.documentElement);
-        })
-        .catch((e: Error) => hud?.setNotice(`PiP failed: ${e.message}`));
+        } catch (e) {
+          hud?.setNotice(`PiP failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      })();
     },
     onToggleLock() {
       const locked = state.lockedTier === null;
