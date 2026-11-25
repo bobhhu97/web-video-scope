@@ -50,12 +50,20 @@ try {
     const store = {};
     window.chrome = {
       runtime: { onMessage: { addListener() {} } },
-      storage: { local: { get: async (k) => ({ [k]: store[k] }), set: async (o) => Object.assign(store, o) } },
+      storage: {
+        local: { get: async (k) => ({ [k]: store[k] }), set: async (o) => Object.assign(store, o) },
+        session: { get: async (k) => ({ [k]: store['s:' + k] }), set: async (o) => { for (const [k, v] of Object.entries(o)) store['s:' + k] = v; } },
+      },
     };
   });
   await page.evaluate(code);
 
-  await page.keyboard.down('Alt'); await page.keyboard.press('KeyS'); await page.keyboard.up('Alt');
+  // The panel auto-opens on a page with video; pressing Alt+S here would close
+  // it. Wait for the mount instead.
+  await page.waitForFunction(
+    () => !!document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.panel'),
+    { timeout: 15000 },
+  ).catch(() => {});
   await new Promise((r) => setTimeout(r, 2500));
 
   const geo = await page.evaluate(() => {

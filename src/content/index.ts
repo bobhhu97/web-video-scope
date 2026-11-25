@@ -276,10 +276,13 @@ async function enable(): Promise<void> {
       hud?.setPerf(0, timer.lastMs, currentTier());
     },
   });
+  stampTitle('enabling');
   hud.mount();
+  stampTitle('hud-mounted');
   unfollowFullscreen = followFullscreen(hud.hostElement!);
 
   buildController();
+  stampTitle('controller-ready');
 
   probe = new Probe(
     (sample) => hud?.setProbe(formatSample(sample, state.units, effectiveRange)),
@@ -294,8 +297,10 @@ async function enable(): Promise<void> {
     if (!video) {
       readability = { kind: 'unknown' };
       hud?.setNotice('No video found on this page.');
+      stampTitle('no-video');
       return;
     }
+    stampTitle('video-found');
     // Tell the user *why* a scope would be empty, instead of showing a blank
     // panel that looks broken.
     readability = videoReadability(video);
@@ -306,6 +311,7 @@ async function enable(): Promise<void> {
     loop.start();
   });
   detector.start();
+  stampTitle(detector.video ? 'detector-video' : 'detector-novideo');
 
   if (!detector.video) hud.setNotice('No video found on this page.');
 }
@@ -326,6 +332,7 @@ async function disable(): Promise<void> {
   probedVideo = null;
   hud?.unmount();
   hud = null;
+  stampTitle('closed');
   rangeDetector.reset();
   governor = initialGovernorState();
 
@@ -335,6 +342,16 @@ async function disable(): Promise<void> {
 
 function toggle(): void {
   void (enabled ? disable() : enable());
+}
+
+/**
+ * Reflect state in document.title so the extension's health can be read without
+ * a screenshot. Only writes while the HUD exists, and restores on unmount.
+ */
+function stampTitle(status: string): void {
+  const marker = ' [VS:';
+  const base = document.title.replace(/ \[VS:[^\]]*\]$/, '');
+  document.title = `${base}${marker}${status}]`;
 }
 
 chrome.runtime.onMessage.addListener((msg: { type?: string }) => {
@@ -352,10 +369,27 @@ window.addEventListener('keydown', (e) => {
 void (async () => {
   try {
     const saved = await loadSettings();
-    if (saved.visible) await enable();
+    // Open automatically the first time this content script ever runs in this
+    // browser session, so a fresh install is discoverable. Afterwards the
+    // persisted flag wins: the user's decision to close the panel must survive a
+    // reload, but "never opened yet" must not look like a broken extension.
+    const KEY = 'firstRunSeen';
+    let firstRun = false;
+    try {
+      const got = await chrome.storage.session.get(KEY);
+      firstRun = !got[KEY];
+      if (firstRun) await chrome.storage.session.set({ [KEY]: true });
+    } catch {
+      // storage.session is unavailable on very old builds; fall back to the flag.
+    }
+    stampTitle(firstRun ? 'first-run' : saved.visible ? 'restoring' : 'closed');
+    if (firstRun || saved.visible) await enable();
   } catch (e) {
     // Content script ran but could not start. Say so on the page.
-    showDiagnostic('error', e instanceof Error ? `${e.name}: ${e.message}` : String(e));
+    const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    stampTitle('enable-failed');
+    showDiagnostic('error', msg);
+    console.error('[video-scopes] enable failed:', msg);
     throw e;
   }
 })();
