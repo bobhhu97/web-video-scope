@@ -15,7 +15,7 @@
 - 目标环境：Chrome 121+（`@webgpu/types` 版本 ≥ 0.1.60，`package.json` 中 `"engines": { "node": ">=20" }`）。
 - Manifest V3，权限只声明需要的：`activeTab`、`scripting`、`storage`、`tabCapture`、`offscreen`；`declarativeNetRequest` 仅在 L2 任务中加入。
 - 所有 GPU 输出 canvas 必须 `alphaMode: 'premultiplied'`，背景透明，由 CSS 提供面板底色。
-- 所有 UI 必须挂在 Shadow DOM 内，宿主根节点 `position: fixed; z-index: 2147483646; all: initial`。
+- 所有 UI 必须挂在 Shadow DOM 内。宿主根节点的内联样式**必须以 `all: initial` 开头**，再写 `position: fixed; z-index: 2147483646`——`all` 会重置全部属性，顺序写反就会把固定定位静默清掉（Task 1 的单测已验证这一点）。
 - 色彩常量（亮度系数、RGB→XYZ 矩阵）不得写死在任何 UI 代码里，只能来自 `src/core/color/`。
 - 分析流程必须由 `requestVideoFrameCallback` 驱动，禁止用裸 `requestAnimationFrame` 轮询视频帧（rAF 只用于渲染循环）。
 - **所有示波器必须读同一张降采样后的分析纹理**，禁止各自直接读全分辨率信号纹理——这是「开销与源分辨率解耦」的结构保证。
@@ -213,8 +213,10 @@ function toggle(): void {
   }
   const host = document.createElement('div');
   host.id = HOST_ID;
+  // `all: initial` MUST come first — it resets every property, so placing it
+  // after `position: fixed` silently drops the host back into normal flow.
   host.style.cssText =
-    'position:fixed;top:16px;right:16px;z-index:2147483646;all:initial;' +
+    'all:initial;position:fixed;top:16px;right:16px;z-index:2147483646;' +
     'font:12px/1.4 ui-monospace,monospace;color:#9fe8b0;background:#101413cc;' +
     'padding:8px 12px;border-radius:6px;border:1px solid #9fe8b033';
   host.textContent = 'Video Scopes ready';
@@ -4092,7 +4094,7 @@ export class Hud {
     const host = document.createElement('div');
     host.id = HOST_ID;
     host.style.cssText =
-      'position:fixed;top:16px;right:16px;width:760px;z-index:2147483646;all:initial;';
+      'all:initial;position:fixed;top:16px;right:16px;width:760px;z-index:2147483646;';
     const root = host.attachShadow({ mode: 'open' });
     root.innerHTML = `
       <style>

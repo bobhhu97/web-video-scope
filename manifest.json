@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Video Scopes",
+  "version": "0.1.0",
+  "description": "Waveform, vectorscope and CIE diagram overlay for any video on the web.",
+  "minimum_chrome_version": "121",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "action": { "default_title": "Toggle video scopes" },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
