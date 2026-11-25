@@ -143,14 +143,43 @@ describe('built content script', () => {
     expect(host(win)).toBe(before);
   });
 
-  it('responds to the toggle-scopes message used by the toolbar button', async () => {
+  it('toolbar click keeps the panel visible instead of hiding it', async () => {
+    // Someone clicking the icon is asking to SEE the scopes. Toggling here used
+    // to close an already-open panel, which is why clicking appeared to do
+    // nothing at all.
     const { win, listeners } = await makeEnv();
     await waitFor(() => host(win) !== null);
+    const before = host(win);
+
     for (const fn of listeners) fn({ type: 'toggle-scopes' });
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(host(win), 'clicking must not remove the panel').not.toBeNull();
+    expect(host(win)).toBe(before);
+  });
+
+  it('toolbar click still reports healthy geometry after repeated clicks', async () => {
+    const { win, listeners } = await makeEnv();
+    await waitFor(() => host(win) !== null);
+    for (let i = 0; i < 3; i++) {
+      for (const fn of listeners) fn({ type: 'toggle-scopes' });
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const h = host(win);
+    expect(h).not.toBeNull();
+    expect(h!.style.position).toBe('fixed');
+    expect(h!.style.top).not.toBe('');
+  });
+
+  it('toolbar click mounts the panel when it was closed with Alt+S', async () => {
+    const { win, listeners } = await makeEnv();
+    await waitFor(() => host(win) !== null);
+    win.dispatchEvent(new win.KeyboardEvent('keydown', { altKey: true, code: 'KeyS' }));
     await waitFor(() => host(win) === null);
     expect(host(win)).toBeNull();
+
     for (const fn of listeners) fn({ type: 'toggle-scopes' });
     await waitFor(() => host(win) !== null);
-    expect(host(win)).not.toBeNull();
+    expect(host(win), 'the icon must bring it back').not.toBeNull();
   });
 });

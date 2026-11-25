@@ -62,6 +62,7 @@ let controller: ScopeController | null = null;
 let state: HudState = { ...DEFAULT_STATE };
 let unfollowFullscreen: (() => void) | null = null;
 let guardian: Guardian | null = null;
+let reattachCount = 0;
 let probe: Probe | null = null;
 let probedVideo: HTMLVideoElement | null = null;
 let readability: Readability = { kind: 'unknown' };
@@ -314,7 +315,9 @@ function finishEnable(): void {
     guardian = keepAttached(
       hud!.hostElement!,
       () => document.fullscreenElement ?? document.documentElement,
-      (n) => stampTitle('reattached', String(n)),
+      (n) => {
+        reattachCount = n;
+      },
     );
 
     buildController();
@@ -349,8 +352,25 @@ function finishEnable(): void {
   detector.start();
     stampTitle(detector.video ? 'detector-video' : 'detector-novideo');
     stampGeometry('geo');
-    // Re-measure after layout settles: the first pass can run before styles apply.
-    setTimeout(() => stampGeometry('geo2'), 1500);
+    // Continuous trace: a single sample cannot distinguish "never mounted" from
+    // "mounted then removed then re-attached". Each line records connectivity,
+    // parent, re-attach count and whether the panel is still enabled.
+    // Keep the whole timeline. Overwriting each second destroyed the evidence:
+    // by the time the user ran the reader, only the final state remained, and
+    // "absent" could mean never-mounted or mounted-then-closed.
+    const history: string[] = [];
+    const trace = setInterval(() => {
+      const h = document.getElementById(HOST_ID);
+      const r = h?.getBoundingClientRect();
+      const seg =
+        (h ? (h.isConnected ? 'conn' : 'detach') : 'ABSENT') +
+        (r ? `@${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}` : '') +
+        `,en=${enabled ? 1 : 0},re=${reattachCount},dis=${h ? getComputedStyle(h).display : '-'}`;
+      history.push(seg);
+      // Keep the last 6 samples; longer than that and the title gets unwieldy.
+      stampTitle('trace', history.slice(-6).join(' > '));
+      if (history.length >= 10) clearInterval(trace);
+    }, 1000);
     if (!detector.video) hud?.setNotice('No video found on this page.');
   } catch (e) {
     // The panel is already on screen, so report here instead of throwing.
@@ -444,8 +464,33 @@ function stampGeometry(tag: string): void {
 }
 
 chrome.runtime.onMessage.addListener((msg: { type?: string }) => {
-  if (msg?.type === 'toggle-scopes') toggle();
+  if (msg?.type === 'toggle-scopes') {
+    // Deliberately `ensureVisible`, not `toggle`: someone clicking the toolbar
+    // icon is asking to see the panel. If it is already mounted they get it
+    // re-attached and brought to the front instead of it disappearing.
+    ensureVisible();
+  }
 });
+
+/**
+ * Guarantee the panel is on screen. Used by the toolbar icon, whose intent is
+ * "show me the scopes", never "hide them".
+ */
+function ensureVisible(): void {
+  if (!enabled) {
+    void enable();
+    return;
+  }
+  const host = document.getElementById(HOST_ID);
+  if (!host) {
+    // Mounted state lost (page rebuild, HUD unmount): rebuild from scratch.
+    void disable().then(() => enable());
+    return;
+  }
+  guardian?.reattach();
+  host.style.zIndex = '2147483646';
+  stampGeometry('ensured');
+}
 
 window.addEventListener('keydown', (e) => {
   if (e.altKey && e.code === 'KeyS') {
