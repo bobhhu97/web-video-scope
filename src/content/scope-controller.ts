@@ -5,7 +5,12 @@ import { ScopeRenderer, type ScopeMode, type ScopeOptions } from '../gpu/scope-r
 import { drawGraticule } from '../ui/graticule';
 import type { PanelTargets } from '../ui/hud';
 import type { PrimariesId } from '../core/color/primaries';
-import { copyFrameToPlanes, type RawPlaneTexture } from '../gpu/raw-planes';
+import {
+  FrameBufferPool,
+  RawPlaneTexture,
+  splitNv12,
+  nv12Layout,
+} from '../gpu/raw-planes';
 import DOWNSCALE_WGSL from '../gpu/shaders/downscale.wgsl?raw';
 import RAW_DOWNSCALE_WGSL from '../gpu/shaders/raw-downscale.wgsl?raw';
 
@@ -46,8 +51,11 @@ export class ScopeController {
   private lastStatsAt = 0;
   private signalMode: SignalMode = 'display';
   private rawPlanes: RawPlaneTexture | null = null;
+  private readonly rawPool = new FrameBufferPool();
   private rawDownscaler: Downscaler | null = null;
   private rawPending = false;
+  /** Set by the owner so raw-path failures reach the UI instead of vanishing. */
+  onRawError: ((message: string) => void) | null = null;
 
   constructor(
     private targets: PanelTargets[],
@@ -173,9 +181,14 @@ export class ScopeController {
   }
 
   /**
-   * One VideoFrame wrap + one plane copy + one RGBA pack per analysed frame.
-   * Deliberately not per rendered frame: at 30 fps this is the dominant cost of
-   * raw mode, so it rides the same fps gate as everything else.
+   * Wrap the current frame, copy its native YUV planes, upload them and pack
+   * them into the shared analysis texture.
+   *
+   * Chromium refuses `copyTo({format:'I420'})` ("doesn't support explicit copy
+   * to non-RGB formats"), so the format argument is omitted and the frame's
+   * native layout is used — NV12 for typical H.264/VP9. Failures are surfaced
+   * via the notice bar rather than swallowed, because a silent failure here is
+   * indistinguishable from a black image.
    */
   private async prepareRaw(video: HTMLVideoElement): Promise<Downscaler | null> {
     if (this.rawPending) return this.rawDownscaler;
@@ -186,25 +199,66 @@ export class ScopeController {
       const a = analysisSize(video.videoWidth, video.videoHeight, this.preset());
       this.rawDownscaler = new Downscaler(this.device, a.width, a.height, RAW_DOWNSCALE_WGSL);
     }
-    if (this.rawPending) return this.rawDownscaler;
 
     let frame: VideoFrame | null = null;
+    this.rawPending = true;
     try {
       frame = new VideoFrame(video);
-      this.rawPending = true;
-      const planes = await copyFrameToPlanes(frame, this.device);
+      const rect = frame.visibleRect ?? { width: frame.codedWidth, height: frame.codedHeight };
+      const width = rect.width;
+      const height = rect.height;
+      const buffer = await this.rawPool.fill(frame);
+
+      // NV12 is the common case; anything else with the same 1.5 bpp shape is
+      // treated identically.
+      const layout = nv12Layout(width, height);
+      if (buffer.length < layout.uvOffset + layout.uvStride * layout.uvHeight) {
+        throw new Error(`unexpected raw frame size ${buffer.length} for ${width}x${height}`);
+      }
+      const { y, uv } = splitNv12(buffer, width, height);
+
+      const device = this.device;
+      const yTex = device.createTexture({
+        size: { width, height },
+        format: 'r8unorm',
+        usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+      });
+      device.queue.writeTexture(
+        { texture: yTex },
+        y as BufferSource,
+        { bytesPerRow: layout.yStride, rowsPerImage: height },
+        { width, height },
+      );
+
+      // The interleaved UV plane is already `rg8`-shaped: one texel per chroma
+      // sample, U in .r and V in .g. No CPU de-interleaving needed.
+      const uvTex = device.createTexture({
+        size: { width: width / 2, height: height / 2 },
+        format: 'rg8unorm',
+        usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+      });
+      device.queue.writeTexture(
+        { texture: uvTex },
+        uv as BufferSource,
+        { bytesPerRow: layout.uvStride, rowsPerImage: layout.uvHeight },
+        { width: width / 2, height: height / 2 },
+      );
+
       if (this.destroyed) {
-        planes.destroy();
+        yTex.destroy();
+        uvTex.destroy();
         return null;
       }
       this.rawPlanes?.destroy();
-      this.rawPlanes = planes;
-      const cmd = this.device.createCommandEncoder();
-      this.rawDownscaler.runRaw(cmd, planes);
-      this.device.queue.submit([cmd.finish()]);
+      this.rawPlanes = new RawPlaneTexture(yTex, uvTex, width, height);
+
+      const cmd = device.createCommandEncoder();
+      this.rawDownscaler.runRaw(cmd, this.rawPlanes);
+      device.queue.submit([cmd.finish()]);
       return this.rawDownscaler;
-    } catch {
-      // e.g. a non-I420 frame format; fall back until the next attempt.
+    } catch (e) {
+      // Report once per failure burst; the caller surfaces it in the notice bar.
+      this.onRawError?.(e instanceof Error ? e.message : String(e));
       return this.rawDownscaler;
     } finally {
       this.rawPending = false;
@@ -280,6 +334,7 @@ export class ScopeController {
     this.rawPlanes = null;
     this.rawDownscaler?.destroy();
     this.rawDownscaler = null;
+    this.rawPool.clear();
     this.device = null;
   }
 }

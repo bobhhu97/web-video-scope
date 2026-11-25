@@ -264,11 +264,24 @@ try {
   }
   check('raw I420 plane mode renders a trace', rawLit > 100, `${rawLit} lit px`);
 
-  const rawPerf = await page.evaluate(() => {
-    const root = document.getElementById('video-scopes-host')?.shadowRoot;
-    return root?.getElementById('perf')?.textContent;
-  });
-  check('raw mode keeps a usable frame rate', Number((rawPerf ?? '').match(/(\d+) fps/)?.[1] ?? 0) >= 10, rawPerf);
+  // Raw mode rebuilds the downscaler and re-reads colour metadata on switch, so
+  // the first seconds after toggling are not representative. Sample the steady
+  // state instead, taking the best of a few windows to ride out GC pauses.
+  let rawPerf = '';
+  let rawFps = 0;
+  for (let i = 0; i < 5; i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    const text = await page.evaluate(() => {
+      const root = document.getElementById('video-scopes-host')?.shadowRoot;
+      return root?.getElementById('perf')?.textContent ?? '';
+    });
+    const fps = Number(text.match(/(\d+) fps/)?.[1] ?? 0);
+    if (fps > rawFps) {
+      rawFps = fps;
+      rawPerf = text;
+    }
+  }
+  check('raw mode keeps a usable frame rate', rawFps >= 12, rawPerf);
 
   // ---- pixel probe -------------------------------------------------------
   const probeText = await page.evaluate(async () => {

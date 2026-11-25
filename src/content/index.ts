@@ -194,6 +194,7 @@ function buildController(): void {
   );
   controller.setMinInterval(1000 / TIER_DESCRIPTION[currentTier()].fps);
   controller.setSignalMode(state.signalMode);
+  controller.onRawError = (msg) => hud?.setNotice(`Raw mode unavailable: ${msg}`);
 }
 
 async function enable(): Promise<void> {

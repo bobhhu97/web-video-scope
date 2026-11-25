@@ -2,23 +2,20 @@
 //
 // The display path feeds `accumulate` values the browser has already expanded
 // to the legal span, which `accumulate.blend()` then maps back to code space.
-// A raw I420 frame is different: Y is *already* a code value, so expanding it
+// A raw YUV frame is different: Y is *already* a code value, so expanding it
 // again would double-compress the signal.
 //
-// To keep one accumulate shader, this pass packs the planes into an rgba8
-// texture with a fixed convention:
+// This pass packs the planes into an rgba8 texture with a fixed convention:
 //   R = Y code value (0..1, i.e. code/255)
-//   G = U in (code - 128) / 224  + 0.5
-//   B = V in (code - 128) / 224  + 0.5
+//   G = U in (code - 128) / 224 * 0.5 + 0.5
+//   B = V in (code - 128) / 224 * 0.5 + 0.5
 //
-// The three planes stay separate textures: U and V are sampled independently
-// here, so the CPU never has to interleave them. Interleaving on the CPU was
-// measured at ~90 ms/frame for 1080p, which is why this shader exists.
+// The chroma texture is a half-resolution rg8unorm view of the buffer, so U and
+// V arrive in one sample. Bilinear filtering does the 4:2:0 upsampling for free.
 
 @group(0) @binding(0) var yPlane: texture_2d<f32>;
-@group(0) @binding(1) var uPlane: texture_2d<f32>;
-@group(0) @binding(2) var vPlane: texture_2d<f32>;
-@group(0) @binding(3) var samp: sampler;
+@group(0) @binding(1) var uvPlane: texture_2d<f32>; // rg8unorm: U in .r, V in .g
+@group(0) @binding(2) var samp: sampler;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -34,13 +31,12 @@ struct VSOut {
 }
 
 fn normChroma(code: f32) -> f32 {
-  // 224/255 is the legal chroma span; recentre so 0.5 is neutral.
+  // 224/255 is the legal chroma span; recentre so 0.0 becomes 0.5.
   return (code - 128.0 / 255.0) * (255.0 / 224.0) * 0.5 + 0.5;
 }
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let y = textureSampleLevel(yPlane, samp, in.uv, 0.0).r;
-  let u = textureSampleLevel(uPlane, samp, in.uv, 0.0).r;
-  let v = textureSampleLevel(vPlane, samp, in.uv, 0.0).r;
-  return vec4f(y, normChroma(u), normChroma(v), 1.0);
+  let uv = textureSampleLevel(uvPlane, samp, in.uv, 0.0).rg;
+  return vec4f(y, normChroma(uv.r), normChroma(uv.g), 1.0);
 }

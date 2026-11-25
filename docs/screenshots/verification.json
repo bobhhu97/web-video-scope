@@ -1,5 +1,5 @@
 {
-  "when": "2026-11-25T04:50:36.131Z",
+  "when": "2026-11-25T05:36:52.216Z",
   "results": [
     {
       "name": "page reached steady state",
@@ -89,7 +89,7 @@
     {
       "name": "low preset shrinks the analysis texture",
       "ok": true,
-      "detail": "src 1280x720 · analysis 320x180 · limited · waveform-luma · bars · 60 fps"
+      "detail": "src 1280x720 · analysis 320x180 · limited · waveform-luma · bars · 61 fps"
     },
     {
       "name": "no WebGPU validation errors",
