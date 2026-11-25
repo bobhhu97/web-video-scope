@@ -112,18 +112,19 @@ async function main() {
         downscaler.run(cmd, signal.texture);
         gpu.device.queue.submit([cmd.finish()]);
 
-        renderer.render(downscaler).then(() => {
-          frames++;
-          const dt = performance.now() - t0;
-          if (dt > 1000) {
-            status.textContent =
-              `src ${signal.width}x${signal.height} · analysis ${downscaler.width}x${downscaler.height} · ` +
-              `${limited ? 'limited' : 'full'} · ${renderer.options.mode} · ${patternKind} · ` +
-              `${((frames * 1000) / dt).toFixed(0)} fps`;
-            frames = 0;
-            t0 = performance.now();
-          }
-        });
+        renderer.submit(downscaler);
+        frames++;
+        const dt = performance.now() - t0;
+        if (dt > 1000) {
+          status.textContent =
+            `src ${signal.width}x${signal.height} · analysis ${downscaler.width}x${downscaler.height} · ` +
+            `${limited ? 'limited' : 'full'} · ${renderer.options.mode} · ${patternKind} · ` +
+            `${((frames * 1000) / dt).toFixed(0)} fps`;
+          frames = 0;
+          t0 = performance.now();
+          // Keep the histogram path exercised so it cannot rot unnoticed.
+          void renderer.readHistogram().catch(() => {});
+        }
         drawGraticule(
           gratCtx,
           { ...renderer.options, width: gratCanvas.width, height: gratCanvas.height },

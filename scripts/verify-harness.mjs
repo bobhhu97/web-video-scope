@@ -82,13 +82,26 @@ try {
 
   async function load(query) {
     await page.goto(`${BASE}/test-harness.html?${query}`, { waitUntil: 'networkidle2' });
-    await page.waitForFunction(
-      () => {
-        const s = document.getElementById('status')?.textContent ?? '';
-        return /fps/.test(s) || /ERROR/.test(s);
-      },
-      { timeout: 20000 },
-    );
+    try {
+      await page.waitForFunction(
+        () => {
+          const s = document.getElementById('status')?.textContent ?? '';
+          return /fps/.test(s) || /ERROR/.test(s);
+        },
+        { timeout: 20000 },
+      );
+    } catch {
+      const diag = await page.evaluate(() => ({
+        status: document.getElementById('status')?.textContent,
+        video: (() => {
+          const v = document.getElementById('video');
+          return v ? { rs: v.readyState, w: v.videoWidth, t: v.currentTime } : null;
+        })(),
+        hasBundle: typeof window.__scope,
+      }));
+      console.log('  [diag]', query, JSON.stringify(diag));
+      throw new Error(`harness never reached steady state: ${query}`);
+    }
     // Let the pipeline settle and the canvas present at least once.
     await new Promise((r) => setTimeout(r, 800));
     return page.$eval('#status', (el) => el.textContent);

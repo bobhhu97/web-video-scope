@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Content script E2E host page</title>
+    <style>
+      body { margin: 0; background: #0b0f12; color: #b9c6d0; font: 12px ui-monospace, monospace; }
+      h1 { font-size: 13px; margin: 12px; color: #d7e3ec; }
+      .wrap { padding: 0 12px 12px; }
+      canvas { display: block; }
+      video { width: 640px; display: block; background: #000; }
+    </style>
+  </head>
+  <body>
+    <h1>Host page (stands in for YouTube / Bilibili / etc.)</h1>
+    <div class="wrap">
+      <canvas id="pattern" width="1280" height="720" style="width:640px"></canvas>
+      <video id="video" muted playsinline loop autoplay></video>
+    </div>
+    <script>
+      // A full-height grey ramp. The extension must detect this video, read its
+      // colour metadata and render scopes over it with no cooperation at all.
+      const pattern = document.getElementById('pattern');
+      const ctx = pattern.getContext('2d');
+      const steps = 16;
+      for (let i = 0; i < steps; i++) {
+        const v = Math.round((i / (steps - 1)) * 255);
+        ctx.fillStyle = `rgb(${v},${v},${v})`;
+        ctx.fillRect(Math.round((i * pattern.width) / steps), 0, Math.ceil(pattern.width / steps), pattern.height);
+      }
+      const video = document.getElementById('video');
+      video.srcObject = pattern.captureStream(30);
+      video.play().catch(() => {});
+      // Expose a readiness flag for the E2E script.
+      video.addEventListener('loadedmetadata', () => {
+        window.__videoReady = true;
+      });
+      window.__videoReady = false;
+    </script>
+  </body>
+</html>

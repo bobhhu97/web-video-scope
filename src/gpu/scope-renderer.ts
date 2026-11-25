@@ -173,8 +173,9 @@ export class ScopeRenderer {
     }
   }
 
-  async render(analysis: AnalysisTexture, readStats = false): Promise<Uint32Array | null> {
-    if (this.destroyed) return null;
+  /** Submit this frame's compute + resolve passes. Synchronous by design. */
+  submit(analysis: AnalysisTexture): void {
+    if (this.destroyed) return;
     const { device, context } = this.gpu;
     const o = this.options;
     const c = LUMA[o.matrix];
@@ -250,19 +251,28 @@ export class ScopeRenderer {
     render.draw(3);
     render.end();
 
-    const wantStats = readStats && !this.histPending;
-    if (wantStats) {
-      encoder.copyBufferToBuffer(this.histBuffer, 0, this.readbackBuffer, 0, 1024);
-      this.histPending = true;
-    }
     device.queue.submit([encoder.finish()]);
+  }
 
-    if (!wantStats) return null;
-    await this.readbackBuffer.mapAsync(GPUMapMode.READ);
-    const hist = new Uint32Array(this.readbackBuffer.getMappedRange().slice(0));
-    this.readbackBuffer.unmap();
-    this.histPending = false;
-    return hist;
+  /**
+   * Ask the GPU for the luma histogram. This is a full GPU->CPU sync, so the
+   * caller must throttle it (a few times per second at most).
+   */
+  async readHistogram(): Promise<Uint32Array | null> {
+    if (this.destroyed || this.histPending) return null;
+    const { device } = this.gpu;
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(this.histBuffer, 0, this.readbackBuffer, 0, 1024);
+    this.histPending = true;
+    device.queue.submit([encoder.finish()]);
+    try {
+      await this.readbackBuffer.mapAsync(GPUMapMode.READ);
+      const hist = new Uint32Array(this.readbackBuffer.getMappedRange().slice(0));
+      this.readbackBuffer.unmap();
+      return hist;
+    } finally {
+      this.histPending = false;
+    }
   }
 
   destroy(): void {

@@ -1,15 +1,15 @@
 {
-  "when": "2026-11-25T04:37:59.598Z",
+  "when": "2026-11-25T04:44:52.831Z",
   "results": [
     {
       "name": "page reached steady state",
       "ok": true,
-      "detail": "src 1280x720 · analysis 640x360 · limited · waveform-luma · bars · 60 fps"
+      "detail": "src 1280x720 · analysis 640x360 · limited · waveform-luma · bars · 61 fps"
     },
     {
       "name": "analysis size is 640x360 for a 1280x720 source",
       "ok": true,
-      "detail": "src 1280x720 · analysis 640x360 · limited · waveform-luma · bars · 60 fps"
+      "detail": "src 1280x720 · analysis 640x360 · limited · waveform-luma · bars · 61 fps"
     },
     {
       "name": "scope renders a signal",
