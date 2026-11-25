@@ -18,10 +18,11 @@ import { JSDOM } from 'jsdom';
 const BUNDLE = resolve(__dirname, '../dist/content.js');
 const HOST_ID = 'video-scopes-host';
 
-async function makeEnv(): Promise<{
+async function makeEnv(opts: { enabled?: boolean } = {}): Promise<{
   win: Window & typeof globalThis;
   store: Record<string, unknown>;
   listeners: Array<(m: unknown) => void>;
+  show: () => void;
 }> {
   const code = existsSync(BUNDLE) ? readFileSync(BUNDLE, 'utf8') : '';
   expect(code.length, 'run `pnpm build` first').toBeGreaterThan(0);
@@ -48,9 +49,16 @@ async function makeEnv(): Promise<{
     },
   };
 
+  // The panel is opt-in; tests that need it mounted ask for it explicitly,
+  // exactly as a toolbar click would.
+  if (opts.enabled !== false) store['s:scopesOn'] = true;
+
   win.eval(code);
   await new Promise((r) => setTimeout(r, 250));
-  return { win, store, listeners };
+  const show = (): void => {
+    for (const fn of listeners) fn({ type: 'show-scopes' });
+  };
+  return { win, store, listeners, show };
 }
 
 const host = (win: Window & typeof globalThis): HTMLElement | null =>
@@ -67,10 +75,10 @@ describe('built content script', () => {
     expect(listeners.length).toBeGreaterThan(0);
   });
 
-  it('opens by itself on a first run', async () => {
-    const { win } = await makeEnv();
-    await waitFor(() => host(win) !== null);
-    expect(host(win)).not.toBeNull();
+  it('stays closed unless asked', async () => {
+    const { win } = await makeEnv({ enabled: false });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(host(win), 'the panel is opt-in').toBeNull();
   });
 
   it('mounts a fixed host with a shadow root and the panel', async () => {

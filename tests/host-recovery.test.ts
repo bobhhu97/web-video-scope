@@ -21,7 +21,7 @@ function makeWindow(): Window & typeof globalThis {
     pretendToBeVisual: true,
   });
   const win = dom.window as unknown as Window & typeof globalThis;
-  const store: Record<string, unknown> = {};
+  const store: Record<string, unknown> = { 's:scopesOn': true };
   (win as unknown as { chrome: unknown }).chrome = {
     runtime: { onMessage: { addListener() {} } },
     storage: {

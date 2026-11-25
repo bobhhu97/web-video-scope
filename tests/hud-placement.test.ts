@@ -32,7 +32,8 @@ describe('HUD placement', () => {
     );
     win = dom.window as unknown as Window & typeof globalThis;
 
-    const store: Record<string, unknown> = {};
+    // Seed the session opt-in: the panel no longer auto-opens.
+    const store: Record<string, unknown> = { 's:scopesOn': true };
     const listeners: Array<(m: unknown) => void> = [];
     (win as unknown as { chrome: unknown }).chrome = {
       runtime: { onMessage: { addListener: (fn: (m: unknown) => void) => listeners.push(fn) } },
@@ -41,6 +42,13 @@ describe('HUD placement', () => {
           get: async (k: string) => ({ [k]: store[k] }),
           set: async (o: Record<string, unknown>) => Object.assign(store, o),
         },
+        // Startup reads storage.session to decide whether the panel is opted in.
+        session: {
+          get: async (k: string) => ({ [k]: store['s:' + k] }),
+          set: async (o: Record<string, unknown>) => {
+            for (const [k, v] of Object.entries(o)) store['s:' + k] = v;
+          },
+        },
       },
     };
     win.eval(code);
@@ -48,10 +56,7 @@ describe('HUD placement', () => {
 
   const host = (): HTMLElement | null => win.document.getElementById(HOST_ID);
 
-  it('mounts the panel automatically on load', async () => {
-    // The first run opens by itself so a fresh install is discoverable.
-    // Pressing Alt+S here would close it, which is the opposite of what this
-    // suite is checking.
+  it('mounts when the session opt-in is set', async () => {
     for (let i = 0; i < 40 && !host(); i++) await new Promise((r) => setTimeout(r, 50));
     expect(host()).not.toBeNull();
   });

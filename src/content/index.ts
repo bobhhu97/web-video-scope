@@ -238,6 +238,15 @@ async function enable(): Promise<void> {
   hud.mount();
   stampTitle('hud-mounted');
 
+  // Remember the opt-in for the rest of this browser session, so switching to
+  // another video tab does not need another click. Session scope means closing
+  // the browser returns to the off state — no permanent background cost.
+  try {
+    await chrome.storage.session.set({ scopesOn: true });
+  } catch {
+    // Non-fatal: the panel still works, it just will not auto-restore.
+  }
+
   // Now the optional work. Failures here degrade the scopes, not the panel.
   try {
     state = { ...(await loadSettings()), visible: true, layout: state.layout };
@@ -306,14 +315,22 @@ function buildHud(): Hud {
  * panel that can explain itself.
  */
 function finishEnable(): void {
+  const mounted = hud?.hostElement;
+  if (!mounted) {
+    // enable() was torn down between mount and this call (a fast close, or a
+    // second enable racing the first). Nothing to wire up.
+    stampTitle('finish-skipped');
+    return;
+  }
+
   try {
-    unfollowFullscreen = followFullscreen(hud!.hostElement!);
+    unfollowFullscreen = followFullscreen(mounted);
 
     // Pages that rebuild their DOM after load (YouTube's hydration) detach the
     // host as collateral. Re-attach whenever that happens, and report the count
     // so this failure mode is visible instead of silent.
     guardian = keepAttached(
-      hud!.hostElement!,
+      mounted,
       () => document.fullscreenElement ?? document.documentElement,
       (n) => {
         reattachCount = n;
@@ -403,10 +420,14 @@ async function disable(): Promise<void> {
   rangeDetector.reset();
   governor = initialGovernorState();
 
-  // Do not persist visible=false. The flag is no longer consulted at startup
-  // (see the boot block), and writing it left a value that contradicted the
-  // actual behaviour — a trap for anyone reading storage later.
   state = { ...state, visible: false };
+  // Closing is an explicit opt-out for the rest of the session: tearing down
+  // the GPU work and leaving it off is the whole point.
+  try {
+    await chrome.storage.session.set({ scopesOn: false });
+  } catch {
+    // Ignore.
+  }
 }
 
 function toggle(): void {
@@ -464,7 +485,7 @@ function stampGeometry(tag: string): void {
 }
 
 chrome.runtime.onMessage.addListener((msg: { type?: string }) => {
-  if (msg?.type === 'toggle-scopes') {
+  if (msg?.type === 'show-scopes' || msg?.type === 'toggle-scopes') {
     // Deliberately `ensureVisible`, not `toggle`: someone clicking the toolbar
     // icon is asking to see the panel. If it is already mounted they get it
     // re-attached and brought to the front instead of it disappearing.
@@ -499,14 +520,28 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// Open on every page load that has a video.
+// Nothing starts automatically.
 //
-// This used to consult a persisted `visible` flag so a deliberate close would
-// survive a reload. That produced a deadlock: closing the panel once made every
-// later page load open nothing, with no indication why — the user sees a
-// completely inert extension. Auto-opening is the less surprising behaviour, and
-// the close button still works for the current page.
+// The panel is opt-in: it costs GPU time, allocates textures, and overlays the
+// page, so it must only run when the user asks for it. `chrome.storage.session`
+// remembers that the user switched it on for THIS browser session, so opening a
+// new video tab keeps working without a click, while a cold start is always
+// silent.
 void (async () => {
+  let shouldStart = false;
+  try {
+    const got = await chrome.storage.session.get('scopesOn');
+    shouldStart = got.scopesOn === true;
+  } catch {
+    // No session storage: stay off. Starting unasked is the worse failure.
+    shouldStart = false;
+  }
+
+  if (!shouldStart) {
+    stampTitle('idle');
+    return;
+  }
+
   // Read settings defensively; a storage failure must not block the panel.
   try {
     const saved = await loadSettings();

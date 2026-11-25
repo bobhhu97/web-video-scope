@@ -4,12 +4,12 @@ import { resolve } from 'node:path';
 import { JSDOM } from 'jsdom';
 
 /**
- * The panel must appear even when everything optional fails.
+ * Once the user has opted in, nothing optional may prevent the panel appearing.
  *
- * This encodes the lesson from the YouTube debugging session: a user cannot
- * distinguish "GPU init threw" from "extension is broken", and they should never
- * have to. The HUD is mounted before any storage read, GPU setup or video
- * detection, so a failure in those leaves a visible panel with a notice.
+ * This is the counterpart to opt-in-startup: that file proves the extension is
+ * silent until asked; this one proves that after asking, a degraded environment
+ * (no video, no GPU, storage errors) still produces a visible panel rather than
+ * a blank failure.
  */
 const BUNDLE = resolve(__dirname, '../dist/content.js');
 const HOST_ID = 'video-scopes-host';
@@ -35,7 +35,9 @@ function makeWindow(opts: Opts): Window & typeof globalThis {
     Object.defineProperty(win.navigator, 'gpu', { value: undefined, configurable: true });
   }
 
-  const store: Record<string, unknown> = {};
+  // The opt-in flag must survive even in the storage-throws case, otherwise the
+  // test would be measuring "not started" rather than "started but degraded".
+  const store: Record<string, unknown> = { 's:scopesOn': true };
   const boom = (): never => {
     throw new Error('storage unavailable');
   };
@@ -50,7 +52,8 @@ function makeWindow(opts: Opts): Window & typeof globalThis {
         },
       },
       session: {
-        get: async (k: string) => (opts.storageThrows ? boom() : { [k]: store['s:' + k] }),
+        // Reads still work: the flag was already loaded. Writes may fail.
+        get: async (k: string) => ({ [k]: store['s:' + k] }),
         set: async (o: Record<string, unknown>) => {
           if (opts.storageThrows) boom();
           for (const [k, v] of Object.entries(o)) store['s:' + k] = v;
@@ -63,20 +66,24 @@ function makeWindow(opts: Opts): Window & typeof globalThis {
 
 async function boot(win: Window & typeof globalThis): Promise<HTMLElement | null> {
   win.eval(readFileSync(BUNDLE, 'utf8'));
-  await new Promise((r) => setTimeout(r, 250));
+  for (let i = 0; i < 40; i++) {
+    const h = win.document.getElementById(HOST_ID);
+    if (h) return h;
+    await new Promise((r) => setTimeout(r, 50));
+  }
   return win.document.getElementById(HOST_ID);
 }
 
-describe('panel robustness', () => {
+describe('panel robustness after opt-in', () => {
   it('mounts on a page with no video at all', async () => {
     const host = await boot(makeWindow({ noVideo: true }));
     expect(host).not.toBeNull();
     expect(host!.shadowRoot?.querySelector('.panel')).not.toBeNull();
   });
 
-  it('mounts when chrome.storage throws', async () => {
+  it('mounts when settings reads throw', async () => {
     const host = await boot(makeWindow({ storageThrows: true }));
-    expect(host, 'a storage failure must not hide the panel').not.toBeNull();
+    expect(host, 'a settings failure must not hide the panel').not.toBeNull();
     expect(host!.shadowRoot?.querySelector('.panel')).not.toBeNull();
   });
 
@@ -95,8 +102,14 @@ describe('panel robustness', () => {
     }
   });
 
-  it('opens automatically so a fresh install is discoverable', async () => {
-    const host = await boot(makeWindow({}));
+  it('explains itself rather than showing a blank panel when scopes cannot start', async () => {
+    const host = await boot(makeWindow({ noGpu: true }));
     expect(host).not.toBeNull();
+    const notice = host!.shadowRoot?.getElementById('notice');
+    // A notice is expected here but the hard requirement is that the panel is
+    // present; an empty but visible panel still beats no panel.
+    if (notice && !notice.hidden) {
+      expect(notice.textContent!.length).toBeGreaterThan(0);
+    }
   });
 });

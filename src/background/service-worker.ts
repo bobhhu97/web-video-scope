@@ -20,7 +20,9 @@ import {
   type CaptureStopResponse,
 } from '../shared/tab-capture';
 
-const TOGGLE = { type: 'toggle-scopes' } as const;
+// `show`, not `toggle`: the toolbar icon means "show me the scopes". A toggle
+// would close an already-open panel, which reads as a dead button.
+const SHOW = { type: 'show-scopes' } as const;
 
 chrome.action.onClicked.addListener((tab) => {
   if (tab.id === undefined) return;
@@ -29,8 +31,8 @@ chrome.action.onClicked.addListener((tab) => {
 
 async function toggleInTab(tabId: number): Promise<void> {
   try {
-    await chrome.tabs.sendMessage(tabId, TOGGLE);
-    console.info('[video-scopes] toggled existing content script in tab', tabId);
+    await chrome.tabs.sendMessage(tabId, SHOW);
+    console.info('[video-scopes] told existing content script to show', tabId);
     return;
   } catch (e) {
     // Most common cause: the tab was open before the extension was installed,
@@ -74,12 +76,18 @@ async function toggleInTab(tabId: number): Promise<void> {
     return;
   }
 
-  try {
-    await chrome.tabs.sendMessage(tabId, TOGGLE);
-    console.info('[video-scopes] injected and toggled tab', tabId);
-  } catch (e) {
-    console.error('[video-scopes] injected but toggle message failed:', String(e));
+  // The listener registers synchronously at script start, but injection and
+  // message delivery race; retry briefly rather than losing the click.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await chrome.tabs.sendMessage(tabId, SHOW);
+      console.info('[video-scopes] injected and showed panel in tab', tabId);
+      return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 60));
+    }
   }
+  console.error('[video-scopes] injected but the panel never answered');
 }
 
 // `return true` keeps the message channel open for the async reply — required

@@ -99,32 +99,38 @@ try {
   const contentJs = readFileSync(resolve(DIST, 'content.js'), 'utf8');
   await page.evaluate(contentJs);
 
-  // The panel now opens by itself on a first run; pressing Alt+S would close it.
-  // Wait for the automatic mount, then confirm the shortcut can close and
-  // reopen it (exercising both directions of the toggle).
-  await page.waitForFunction(
-    () => document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.grid') !== null,
-    { timeout: 15000 },
-  );
-  check('HUD mounts automatically on load', true);
-
+  // The panel is opt-in. It must stay off until asked, then the shortcut and
+  // the toolbar message must both be able to bring it up.
   const pressAltS = async () => {
     await page.keyboard.down('Alt');
     await page.keyboard.press('KeyS');
     await page.keyboard.up('Alt');
   };
 
+  const initial = await page.evaluate(() => !!document.getElementById('video-scopes-host'));
+  check('stays closed until asked', !initial);
+
+  await pressAltS();
+  const mountedByShortcut = await page
+    .waitForFunction(
+      () => !!document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.panel'),
+      { timeout: 12000 },
+    )
+    .then(() => true)
+    .catch(() => false);
+  check('Alt+S opens the panel', mountedByShortcut);
+
   await pressAltS();
   const closed = await page
     .waitForFunction(() => document.getElementById('video-scopes-host') === null, { timeout: 8000 })
     .then(() => true)
     .catch(() => false);
-  check('Alt+S closes the panel', closed);
+  check('Alt+S closes the panel again', closed);
 
   await pressAltS();
   const reopened = await page
     .waitForFunction(
-      () => document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.panel') !== null,
+      () => !!document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.panel'),
       { timeout: 8000 },
     )
     .then(() => true)
@@ -294,7 +300,18 @@ try {
     )
     .then(() => true)
     .catch(() => false);
-  check('panel returns after a reload', cameBack);
+  check('a closed panel stays closed on reload (session opt-out)', !cameBack);
+
+  // And asking again must work after that reload.
+  await pressAltS();
+  const backAfterAsk = await page
+    .waitForFunction(
+      () => !!document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.panel'),
+      { timeout: 10000 },
+    )
+    .then(() => true)
+    .catch(() => false);
+  check('Alt+S still opens it after a reload', backAfterAsk);
 
   // ---- raw plane mode -----------------------------------------------------
   // The reload above re-injected the script, so the panel is already open;

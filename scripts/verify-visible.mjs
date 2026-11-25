@@ -58,8 +58,15 @@ try {
   });
   await page.evaluate(code);
 
-  // The panel auto-opens on a page with video; pressing Alt+S here would close
-  // it. Wait for the mount instead.
+  // The panel is opt-in. Confirm it stays off, then ask for it the way the
+  // toolbar icon does.
+  const beforeClick = await page.evaluate(() => !!document.getElementById('video-scopes-host'));
+  check('stays closed until asked', !beforeClick);
+
+  await page.evaluate(() => {
+    window.dispatchEvent(new KeyboardEvent('keydown', { altKey: true, code: 'KeyS' }));
+  });
+
   await page.waitForFunction(
     () => !!document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.panel'),
     { timeout: 15000 },
