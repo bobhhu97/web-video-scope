@@ -152,6 +152,11 @@ export class ScopeRenderer {
     });
   }
 
+  /** The axis mapping actually uploaded to the shader on the next submit. */
+  get axisMap(): { black: number; span: number } {
+    return axisMapping(this.options.range);
+  }
+
   resize(width: number, height: number): void {
     if (width === this.options.width && height === this.options.height) return;
     this.options.width = width;

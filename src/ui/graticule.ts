@@ -6,7 +6,15 @@ import { axisToUnit, legalBands, tickValues, unitSuffix } from '../core/scale/un
 import { CIE_BOUNDS } from '../core/scopes/reference';
 import type { ScopeOptions } from '../gpu/scope-renderer';
 
-export const WAVE_PAD = { top: 8, right: 8, bottom: 16, left: 40 } as const;
+/**
+ * Plot margins, in CSS pixels.
+ *
+ * These were 8/8/16/40, which left only ~161 px of plot height inside a 2x2
+ * grid cell (~185 px tall). Ten IRE gridlines in 161 px reads as a solid block,
+ * and the outermost labels were clipped by the cell edge. The bottom margin
+ * also has to fit the parade's R/G/B captions.
+ */
+export const WAVE_PAD = { top: 14, right: 10, bottom: 22, left: 44 } as const;
 
 /**
  * The graticule is drawn on a transparent overlay canvas stacked above the GPU
@@ -62,15 +70,25 @@ export function drawWaveformGraticule(ctx: CanvasRenderingContext2D, o: ScopeOpt
   ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  for (const a of tickValues(o.units, o.range)) {
+
+  // Label every tick only when there is room for it. In a 2x2 cell the plot can
+  // be under 200 px tall, where ten labels collide into a smear; thin them out
+  // while still drawing every gridline, so the scale stays accurate.
+  const MIN_LABEL_GAP = 22;
+  const ticks = tickValues(o.units, o.range);
+  let lastLabelY = Number.NEGATIVE_INFINITY;
+  for (const a of ticks) {
     const y = axisToCanvasY(a, plotTop, plotH, o.zoom);
     ctx.strokeStyle = GRID;
     ctx.beginPath();
     ctx.moveTo(plotLeft, y);
     ctx.lineTo(plotLeft + plotW, y);
     ctx.stroke();
+
+    if (y - lastLabelY < MIN_LABEL_GAP) continue;
+    lastLabelY = y;
     ctx.fillStyle = TEXT;
-    ctx.fillText(String(Math.round(axisToUnit(a, o.units, o.range))), plotLeft - 4, y);
+    ctx.fillText(String(Math.round(axisToUnit(a, o.units, o.range))), plotLeft - 5, y);
   }
 
   ctx.strokeStyle = LEGAL;

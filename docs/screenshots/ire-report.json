@@ -1,0 +1,12 @@
+[
+  {
+    "name": "display white on a limited axis",
+    "encode": "255 * x",
+    "expectMax": 100,
+    "expectMin": 0,
+    "status": "axis:limited · webcodecs",
+    "maxIre": 100.5,
+    "minIre": 0.5,
+    "ok": true
+  }
+]

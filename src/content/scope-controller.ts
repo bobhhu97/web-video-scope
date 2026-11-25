@@ -382,6 +382,17 @@ export class ScopeController {
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     drawGraticule(ctx, { ...renderer.options, width: w, height: h }, this.gamuts());
+
+    // One renderer draws the trace and the gridlines for a panel, so they share
+    // a range by construction. Verify it anyway: a mismatch here is exactly the
+    // "white reads above 100 IRE" symptom, and it is silent otherwise.
+    const map = renderer.axisMap;
+    const expected = renderer.options.range.limited
+      ? { black: 16 / 255, span: 219 / 255 }
+      : { black: 0, span: 1 };
+    if (Math.abs(map.black - expected.black) > 1e-6 || Math.abs(map.span - expected.span) > 1e-6) {
+      console.error('[video-scopes] axis mismatch', map, expected);
+    }
   }
 
   destroy(): void {

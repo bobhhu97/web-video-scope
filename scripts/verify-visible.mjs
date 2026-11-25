@@ -7,7 +7,7 @@ import puppeteer from 'puppeteer-core';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 const DIST = resolve('dist');
@@ -37,7 +37,7 @@ try {
   await page.setViewport({ width: 1280, height: 800 });
 
   // Make the page TALL, like YouTube.
-  await page.goto('http://127.0.0.1:4260/content-host.html', { waitUntil: 'networkidle2' });
+  await page.goto('http://127.0.0.1:4260/content-host.html?vsInline=1', { waitUntil: 'networkidle2' });
   await page.evaluate(() => {
     const spacer = document.createElement('div');
     spacer.style.height = '8000px';
@@ -96,6 +96,15 @@ try {
     geo ? `${geo.width}x${geo.height}` : 'n/a');
 
   await page.screenshot({ path: resolve('docs/screenshots/hud-in-viewport.png') });
+
+  // Capture the panel at its real 2x2 size. Element screenshots go through the
+  // compositor, so the WebGPU canvases are included (an in-page canvas
+  // serialisation returned blank because the GPU layer had not been presented).
+  const hostEl = await page.$('#video-scopes-host');
+  if (hostEl) {
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    await hostEl.screenshot({ path: resolve('docs/screenshots/grid-layout.png') });
+  }
 } finally {
   await browser.close();
   await new Promise((k) => server.close(k));

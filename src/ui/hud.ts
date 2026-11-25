@@ -151,25 +151,45 @@ export class Hud {
     this.buildCells();
   }
 
+  /**
+   * Source metadata, prefixed `src:` to distinguish it from the range the scopes
+   * are currently drawing on.
+   *
+   * Two badges used to present range independently — this one from the decoder's
+   * metadata, the other from the detector's verdict — so they could disagree
+   * with no explanation. When a file is labelled limited but its content extends
+   * past legal white, the axis draws on `full` and the trace passes 100 IRE. That
+   * looked like a rendering bug rather than the diagnostic it is.
+   */
   setColorInfo(info: ColorSpaceInfo): void {
     const el = this.root?.getElementById('cs');
     if (!el) return;
-    const range = info.fullRange === null ? 'range ?' : info.fullRange ? 'full' : 'limited';
+    const range = info.fullRange === null ? 'range?' : info.fullRange ? 'full' : 'limited';
     const parts = [
       (info.matrix ?? '?').toUpperCase(),
-      range,
+      `src:${range}`,
       info.transfer,
     ];
     if (info.format) parts.push(info.format);
     el.textContent = parts.join(' · ');
+    el.title =
+      'Colour metadata read from the video decoder. ' +
+      'The scopes draw on the axis shown by the status badge, which may differ ' +
+      'when the content does not match its label.';
   }
 
   setDiagnosis(d: RangeDiagnosis): void {
     const status = this.root?.getElementById('status');
     const warn = this.root?.getElementById('warn');
     if (status) {
-      status.textContent = `${d.effective} · ${d.source}`;
+      // "axis:full" states plainly which scale the trace is plotted against,
+      // which is the thing a reading above 100 IRE depends on.
+      status.textContent = `axis:${d.effective} · ${d.source}`;
       status.className = `badge ${d.effective === 'full' ? 'ok' : ''}`;
+      status.title =
+        d.effective === 'full'
+          ? 'Plotting on a full-range axis (0-255). A signal that is already full range will read above 100 IRE.'
+          : 'Plotting on a limited-range axis (16-235). Legal white reads 100 IRE.';
     }
     if (warn) {
       if (d.warning) {
