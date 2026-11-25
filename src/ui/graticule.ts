@@ -1,0 +1,341 @@
+import { LUMA, SKIN_TONE_ANGLE_DEG, chromaTargets } from '../core/color/matrices';
+import { CIE1931_LOCUS, gamutTriangle } from '../core/color/locus';
+import { linearToSrgb, xyToLinearSrgb } from '../core/color/transfer';
+import type { PrimariesId } from '../core/color/primaries';
+import { axisToUnit, legalBands, tickValues, unitSuffix } from '../core/scale/units';
+import { CIE_BOUNDS } from '../core/scopes/reference';
+import type { ScopeOptions } from '../gpu/scope-renderer';
+
+export const WAVE_PAD = { top: 8, right: 8, bottom: 16, left: 40 } as const;
+
+/**
+ * The graticule is drawn on a transparent overlay canvas stacked above the GPU
+ * density canvas. It must never fill an opaque background — doing so would
+ * cover the waveform completely. The panel background comes from CSS.
+ */
+const GRID = '#1b232b';
+const GRID_MAJOR = '#33414d';
+const LEGAL = '#5d7f93';
+const BAND = 'rgba(255,255,255,0.035)';
+const TEXT = '#7d8b96';
+
+/**
+ * Axis (0..1 in code space) to canvas y. `zoom` magnifies from the floor so
+ * HDR headroom can be inspected without changing the data.
+ */
+export function axisToCanvasY(axis: number, plotTop: number, plotHeight: number, zoom = 1): number {
+  const clamped = Math.min(1, Math.max(0, axis * zoom));
+  return plotTop + plotHeight * (1 - clamped);
+}
+
+export function canvasYToAxis(y: number, plotTop: number, plotHeight: number, zoom = 1): number {
+  const rel = 1 - (y - plotTop) / plotHeight;
+  return Math.min(1, Math.max(0, rel)) / zoom;
+}
+
+export function drawWaveformGraticule(ctx: CanvasRenderingContext2D, o: ScopeOptions): void {
+  // o.width / o.height are CSS pixels; the 2D context already carries a DPR transform.
+  const w = o.width;
+  const h = o.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const plotTop = WAVE_PAD.top;
+  const plotH = h - WAVE_PAD.top - WAVE_PAD.bottom;
+  const plotLeft = WAVE_PAD.left;
+  const plotW = w - WAVE_PAD.left - WAVE_PAD.right;
+  if (plotW <= 0 || plotH <= 0) return;
+
+  const bands = legalBands(o.range);
+  if (bands.footroom[1] > bands.footroom[0]) {
+    const y0 = axisToCanvasY(bands.footroom[1], plotTop, plotH, o.zoom);
+    const y1 = axisToCanvasY(bands.footroom[0], plotTop, plotH, o.zoom);
+    ctx.fillStyle = BAND;
+    ctx.fillRect(plotLeft, y0, plotW, y1 - y0);
+  }
+  if (bands.headroom[1] > bands.headroom[0]) {
+    const y0 = axisToCanvasY(bands.headroom[1], plotTop, plotH, o.zoom);
+    const y1 = axisToCanvasY(bands.headroom[0], plotTop, plotH, o.zoom);
+    ctx.fillStyle = BAND;
+    ctx.fillRect(plotLeft, y0, plotW, y1 - y0);
+  }
+
+  ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (const a of tickValues(o.units, o.range)) {
+    const y = axisToCanvasY(a, plotTop, plotH, o.zoom);
+    ctx.strokeStyle = GRID;
+    ctx.beginPath();
+    ctx.moveTo(plotLeft, y);
+    ctx.lineTo(plotLeft + plotW, y);
+    ctx.stroke();
+    ctx.fillStyle = TEXT;
+    ctx.fillText(String(Math.round(axisToUnit(a, o.units, o.range))), plotLeft - 4, y);
+  }
+
+  ctx.strokeStyle = LEGAL;
+  ctx.setLineDash([4, 3]);
+  for (const a of [bands.footroom[1], bands.headroom[0]]) {
+    if (a <= 0 || a >= 1) continue;
+    const y = axisToCanvasY(a, plotTop, plotH, o.zoom);
+    ctx.beginPath();
+    ctx.moveTo(plotLeft, y);
+    ctx.lineTo(plotLeft + plotW, y);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // Parade: draw the slice dividers so the three panels read as separate scopes.
+  if (o.mode === 'waveform-parade') {
+    ctx.strokeStyle = GRID_MAJOR;
+    ctx.setLineDash([2, 4]);
+    for (let i = 1; i < 3; i++) {
+      const x = plotLeft + (plotW * i) / 3;
+      ctx.beginPath();
+      ctx.moveTo(x, plotTop);
+      ctx.lineTo(x, plotTop + plotH);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = TEXT;
+    for (const [i, label] of ['R', 'G', 'B'].entries()) {
+      ctx.fillText(label, plotLeft + (plotW * (i + 0.5)) / 3, plotTop + plotH + 9);
+    }
+  }
+
+  ctx.strokeStyle = GRID_MAJOR;
+  ctx.strokeRect(plotLeft + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = TEXT;
+  ctx.fillText(unitSuffix(o.units), 4, plotTop + 6);
+}
+
+export function chromaToScreen(
+  cb: number,
+  cr: number,
+  size: number,
+  zoom: number,
+  ox = size / 2,
+  oy = size / 2,
+): [number, number] {
+  return [ox + cb * zoom * size, oy - cr * zoom * size];
+}
+
+export function screenToChroma(
+  x: number,
+  y: number,
+  size: number,
+  zoom: number,
+  ox = size / 2,
+  oy = size / 2,
+): [number, number] {
+  return [(x - ox) / (zoom * size), (oy - y) / (zoom * size)];
+}
+
+export function drawVectorscopeGraticule(ctx: CanvasRenderingContext2D, o: ScopeOptions): void {
+  const w = o.width;
+  const h = o.height;
+  const size = Math.min(w, h);
+  const cx = w / 2;
+  const cy = h / 2;
+  const radius = (size / 2) * o.zoom;
+
+  ctx.clearRect(0, 0, w, h);
+
+  ctx.strokeStyle = GRID_MAJOR;
+  ctx.lineWidth = 1;
+  for (const frac of [0.25, 0.5, 0.75, 1]) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * frac, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - radius);
+  ctx.lineTo(cx, cy + radius);
+  ctx.moveTo(cx - radius, cy);
+  ctx.lineTo(cx + radius, cy);
+  ctx.stroke();
+
+  const c = LUMA[o.matrix];
+  ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+
+  for (const level of [1, 0.75]) {
+    const targets = chromaTargets(c, level);
+    ctx.strokeStyle = level === 0.75 ? '#a8b3bd' : '#5a6470';
+    for (const t of targets) {
+      const [px, py] = chromaToScreen(t.cb, t.cr, size, o.zoom, cx, cy);
+      if (Math.hypot(px - cx, py - cy) > radius + 2) continue;
+      const s = Math.max(4, Math.min(16, t.radius * o.zoom * size * 0.14));
+      ctx.strokeRect(px - s / 2, py - s / 2, s, s);
+      if (level === 0.75) {
+        ctx.fillStyle = '#a8b3bd';
+        ctx.fillText(t.name[0]!.toUpperCase(), px + s / 2 + 2, py);
+      }
+    }
+  }
+
+  const ang = (SKIN_TONE_ANGLE_DEG * Math.PI) / 180;
+  ctx.strokeStyle = '#d8a06a';
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + Math.cos(ang) * radius * 0.95, cy - Math.sin(ang) * radius * 0.95);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = TEXT;
+  ctx.textAlign = 'left';
+  ctx.fillText(
+    `${o.matrix.toUpperCase()} · ${o.zoom}x${o.range.limited ? ' · limited' : ' · full'}`,
+    8,
+    14,
+  );
+}
+
+export function xyToUv(x: number, y: number): [number, number] {
+  const d = -2 * x + 12 * y + 3;
+  return [(4 * x) / d, (9 * y) / d];
+}
+
+export function uvToXy(u: number, v: number): [number, number] {
+  const d = 6 * u - 16 * v + 12;
+  return [(9 * u) / d, (4 * v) / d];
+}
+
+export function xyToScreen(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  coord: 'xy' | 'uv',
+): [number, number] {
+  const [x0, y0, x1, y1] = CIE_BOUNDS[coord];
+  return [((x - x0) / (x1 - x0)) * w, h - ((y - y0) / (y1 - y0)) * h];
+}
+
+export function screenToXy(
+  px: number,
+  py: number,
+  w: number,
+  h: number,
+  coord: 'xy' | 'uv',
+): [number, number] {
+  const [x0, y0, x1, y1] = CIE_BOUNDS[coord];
+  return [x0 + (px / w) * (x1 - x0), y0 + ((h - py) / h) * (y1 - y0)];
+}
+
+function chartToScreen(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  coord: 'xy' | 'uv',
+): [number, number] {
+  return coord === 'xy' ? xyToScreen(x, y, w, h, 'xy') : xyToScreen(...xyToUv(x, y), w, h, 'uv');
+}
+
+function locusHue(x: number, y: number): string {
+  const [r, g, b] = xyToLinearSrgb([x, y]);
+  const enc = (v: number): number =>
+    Math.round(Math.min(1, Math.max(0, linearToSrgb(Math.max(v, 0)))) * 255);
+  return `rgb(${enc(r)},${enc(g)},${enc(b)})`;
+}
+
+export function drawCieGraticule(
+  ctx: CanvasRenderingContext2D,
+  o: ScopeOptions & { gamuts: PrimariesId[] },
+): void {
+  const w = o.width;
+  const h = o.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const pts = CIE1931_LOCUS.map((p) => chartToScreen(p[0], p[1], w, h, o.coord));
+
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+  ctx.closePath();
+  ctx.fillStyle = '#141b21';
+  ctx.fill();
+  ctx.strokeStyle = '#4a5a66';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.lineWidth = 3;
+  for (let i = 0; i < pts.length; i++) {
+    const [x, y] = pts[i]!;
+    const [lx, ly] = CIE1931_LOCUS[i]!;
+    ctx.strokeStyle = locusHue(lx, ly);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    const next = pts[Math.min(i + 1, pts.length - 1)]!;
+    ctx.lineTo(next[0], next[1]);
+    ctx.stroke();
+  }
+
+  ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  const GAMUT_COLOR: Record<PrimariesId, string> = {
+    rec709: '#7fa8d8',
+    p3: '#d8c07f',
+    rec2020: '#d87f7f',
+  };
+  const GAMUT_LABEL: Record<PrimariesId, string> = {
+    rec709: 'Rec.709',
+    p3: 'P3',
+    rec2020: 'Rec.2020',
+  };
+  for (const id of o.gamuts) {
+    const tri = gamutTriangle(id).map((p) => chartToScreen(p[0], p[1], w, h, o.coord));
+    ctx.beginPath();
+    tri.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+    ctx.closePath();
+    ctx.strokeStyle = GAMUT_COLOR[id];
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    const [lx, ly] = tri[1]!;
+    ctx.fillStyle = GAMUT_COLOR[id];
+    ctx.fillText(GAMUT_LABEL[id], lx + 4, ly);
+  }
+
+  const white = o.coord === 'xy' ? ([0.3127, 0.329] as const) : xyToUv(0.3127, 0.329);
+  const [wx, wy] = xyToScreen(white[0], white[1], w, h, o.coord);
+  ctx.strokeStyle = '#e8e8e8';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(wx - 5, wy);
+  ctx.lineTo(wx + 5, wy);
+  ctx.moveTo(wx, wy - 5);
+  ctx.lineTo(wx, wy + 5);
+  ctx.stroke();
+  ctx.fillStyle = TEXT;
+  ctx.fillText(
+    `D65 · ${o.coord === 'xy' ? 'CIE 1931 xy' : "CIE 1976 u'v'"} · ${o.primaries}`,
+    8,
+    14,
+  );
+}
+
+/**
+ * Single entry point used by the controller. Dispatch keeps the caller
+ * ignorant of which graticule implementation a mode needs.
+ */
+export function drawGraticule(
+  ctx: CanvasRenderingContext2D,
+  o: ScopeOptions,
+  gamuts: readonly PrimariesId[] = ['rec709'],
+): void {
+  switch (o.mode) {
+    case 'vectorscope':
+      drawVectorscopeGraticule(ctx, o);
+      break;
+    case 'cie':
+      drawCieGraticule(ctx, { ...o, gamuts: [...gamuts] });
+      break;
+    default:
+      drawWaveformGraticule(ctx, o);
+  }
+}

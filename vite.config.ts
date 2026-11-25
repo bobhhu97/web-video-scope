@@ -17,15 +17,19 @@ const copyManifest = {
  */
 export default defineConfig(({ mode }) => {
   if (mode === 'harness') {
+    // `build.lib` is required: a plain rollupOptions entry with only
+    // re-exports gets its exports tree-shaken away (preserveEntrySignatures
+    // defaults to false), producing an empty bundle.
     return {
       build: {
         outDir: 'dist',
         emptyOutDir: false,
         target: 'chrome121',
         minify: false,
-        rollupOptions: {
-          input: { 'gpu/harness-bundle': resolve(__dirname, 'src/harness-entry.ts') },
-          output: { entryFileNames: '[name].js', format: 'es' },
+        lib: {
+          entry: resolve(__dirname, 'src/harness-entry.ts'),
+          formats: ['es'],
+          fileName: () => 'gpu/harness-bundle.js',
         },
       },
       publicDir: false,

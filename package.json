@@ -11,13 +11,16 @@
     "dev": "vite build --watch",
     "harness": "vite build --mode harness",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "verify": "node scripts/verify-harness.mjs",
+    "verify:headed": "node scripts/verify-harness.mjs --headed"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",
     "@types/jsdom": "^30.0.0",
     "@webgpu/types": "^0.1.60",
     "jsdom": "^31.0.1",
+    "puppeteer-core": "^25.18.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",
     "vitest": "^2.1.8"
