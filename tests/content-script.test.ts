@@ -98,14 +98,27 @@ describe('built content script', () => {
     expect(root.getElementById('layout')).not.toBeNull();
   });
 
-  it('closes on Alt+S and persists visible=false', async () => {
-    const { win, store } = await makeEnv();
+  it('closes on Alt+S for the current page', async () => {
+    const { win } = await makeEnv();
     await waitFor(() => host(win) !== null);
     win.dispatchEvent(new win.KeyboardEvent('keydown', { altKey: true, code: 'KeyS' }));
     await waitFor(() => host(win) === null);
     expect(host(win)).toBeNull();
-    const saved = store['video-scopes:state'] as { visible?: boolean } | undefined;
-    expect(saved?.visible).toBe(false);
+  });
+
+  it('reopens on the next page load even after being closed', async () => {
+    // The deadlock this guards against: persisting visible=false made a single
+    // close suppress the panel forever, with nothing on screen to explain it.
+    const first = await makeEnv();
+    await waitFor(() => host(first.win) !== null);
+    first.win.dispatchEvent(new first.win.KeyboardEvent('keydown', { altKey: true, code: 'KeyS' }));
+    await waitFor(() => host(first.win) === null);
+    expect(host(first.win)).toBeNull();
+
+    // Simulate a reload: a brand new document, same storage.
+    const second = await makeEnv();
+    await waitFor(() => host(second.win) !== null);
+    expect(host(second.win), 'a reload must bring the panel back').not.toBeNull();
   });
 
   it('reopens on a second Alt+S', async () => {

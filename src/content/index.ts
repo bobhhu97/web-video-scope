@@ -367,8 +367,10 @@ async function disable(): Promise<void> {
   rangeDetector.reset();
   governor = initialGovernorState();
 
+  // Do not persist visible=false. The flag is no longer consulted at startup
+  // (see the boot block), and writing it left a value that contradicted the
+  // actual behaviour — a trap for anyone reading storage later.
   state = { ...state, visible: false };
-  await saveSettings(state);
 }
 
 function toggle(): void {
@@ -396,47 +398,32 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// Restore the previous session automatically.
+// Open on every page load that has a video.
+//
+// This used to consult a persisted `visible` flag so a deliberate close would
+// survive a reload. That produced a deadlock: closing the panel once made every
+// later page load open nothing, with no indication why — the user sees a
+// completely inert extension. Auto-opening is the less surprising behaviour, and
+// the close button still works for the current page.
 void (async () => {
-  // Read settings defensively. A storage failure must not prevent the panel
-  // from appearing — that would make an infrastructure hiccup look exactly like
-  // a broken extension, which is precisely the failure mode this file has been
-  // rewritten to avoid.
-  let saved = { ...DEFAULT_STATE };
+  // Read settings defensively; a storage failure must not block the panel.
   try {
-    saved = await loadSettings();
+    const saved = await loadSettings();
+    state = { ...saved, visible: true };
   } catch (e) {
     console.warn('[video-scopes] settings unavailable, using defaults:', e);
+    state = { ...DEFAULT_STATE, visible: true };
   }
 
-  // Automatic opening rule: a fresh install (or the first page of a browser
-  // session) opens once so the panel is discoverable; afterwards the persisted
-  // flag wins, so a deliberate close survives a reload.
-  let firstRun = false;
   try {
-    const KEY = 'firstRunSeen';
-    const got = await chrome.storage.session.get(KEY);
-    firstRun = !got[KEY];
-    if (firstRun) await chrome.storage.session.set({ [KEY]: true });
-  } catch {
-    // storage.session may be unavailable; treat it as a first run so the user
-    // sees something rather than nothing.
-    firstRun = true;
-  }
-
-  if (firstRun || saved.visible) {
-    try {
-      await enable();
-    } catch (e) {
-      const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-      stampTitle('enable-failed');
-      // enable() mounts the panel first, so this only fires for failures in the
-      // mount itself — report visibly in that case.
-      showDiagnostic('error', msg);
-      console.error('[video-scopes] enable failed:', msg);
-    }
-  } else {
-    stampTitle('closed');
+    await enable();
+  } catch (e) {
+    const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    stampTitle('enable-failed');
+    // enable() mounts the panel first, so this only fires for failures in the
+    // mount itself — report visibly in that case.
+    showDiagnostic('error', msg);
+    console.error('[video-scopes] enable failed:', msg);
   }
 })();
 
