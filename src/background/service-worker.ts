@@ -30,12 +30,31 @@ chrome.action.onClicked.addListener((tab) => {
 async function toggleInTab(tabId: number): Promise<void> {
   try {
     await chrome.tabs.sendMessage(tabId, TOGGLE);
-  } catch {
-    // No content script yet (tab predates the extension). Inject, then toggle.
+    console.info('[video-scopes] toggled existing content script in tab', tabId);
+    return;
+  } catch (e) {
+    // Most common cause: the tab was open before the extension was installed,
+    // so no content script is running in it yet.
+    console.info('[video-scopes] no content script in tab, injecting:', String(e));
+  }
+
+  try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
-    await chrome.tabs.sendMessage(tabId, TOGGLE).catch(() => {
-      // The listener may still be registering; Alt+S also opens the panel.
-    });
+  } catch (e) {
+    // This is the failure the user sees as "clicking does nothing". It happens
+    // on protected pages (chrome://, the Web Store, PDF viewer) and on pages
+    // where the extension lacks host access.
+    console.error('[video-scopes] injection failed:', String(e));
+    await chrome.action.setBadgeText({ tabId, text: '!' }).catch(() => {});
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: '#d87f7f' }).catch(() => {});
+    return;
+  }
+
+  try {
+    await chrome.tabs.sendMessage(tabId, TOGGLE);
+    console.info('[video-scopes] injected and toggled tab', tabId);
+  } catch (e) {
+    console.error('[video-scopes] injected but toggle message failed:', String(e));
   }
 }
 

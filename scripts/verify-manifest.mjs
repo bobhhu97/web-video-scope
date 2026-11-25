@@ -85,8 +85,23 @@ for (const [perm, api] of Object.entries(API_FOR)) {
   if (!api || !perms.includes(perm)) continue;
   check(`permission "${perm}" is used (${api})`, bundleText.includes(api));
 }
-check('host_permissions are scoped or absent', !manifest.host_permissions || manifest.host_permissions.every((h) => h !== '<all_urls>' || perms.includes('declarativeNetRequestWithHostAccess')),
-  JSON.stringify(manifest.host_permissions ?? 'none'));
+// A content script declared for <all_urls> does NOT run unless the extension
+// also holds matching host permissions. Omitting them is the single most likely
+// reason "clicking the toolbar button does nothing", so require coverage here.
+const declaredMatches = (manifest.content_scripts ?? []).flatMap((c) => c.matches ?? []);
+const hostPerms = manifest.host_permissions ?? [];
+const coversAllUrls = hostPerms.includes('<all_urls>');
+const needsAllUrls = declaredMatches.includes('<all_urls>');
+check(
+  'content script matches are covered by host permissions',
+  !needsAllUrls || coversAllUrls,
+  needsAllUrls
+    ? coversAllUrls
+      ? '<all_urls> covered'
+      : 'MISSING host_permissions for <all_urls> — content script will never be injected'
+    : 'no <all_urls> script',
+);
+check('host_permissions declared', hostPerms.length > 0, JSON.stringify(hostPerms));
 
 // ---- extension-specific rules from the chrome-extensions skill -----------
 // Icons: only reference files that exist. Omitted is fine (Chrome defaults).
