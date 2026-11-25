@@ -17,6 +17,7 @@
  */
 import { linearRgbToXyz, xyzToUV, xyzToXY, type PrimariesId } from '../core/color/primaries';
 import { srgbToLinear } from '../core/color/transfer';
+import { cieFrame, frameToScreen, screenToFrame } from '../core/color/cie-frame';
 import type { LumaCoefficients } from '../core/color/matrices';
 
 /**
@@ -32,11 +33,6 @@ export interface ScatterPlot {
   height: number;
 }
 
-/** Bounds of the CIE plot, in chromaticity units. */
-export const CIE_BOUNDS: Record<'xy' | 'uv', [number, number, number, number]> = {
-  xy: [0, 0, 0.8, 0.9],
-  uv: [0, 0, 0.62, 0.6],
-};
 
 function makeBuffer(w: number, h: number): Uint8ClampedArray<ArrayBuffer> {
   return new Uint8ClampedArray(w * h * 4);
@@ -94,10 +90,14 @@ export function renderCie(
   outH: number,
   primaries: PrimariesId,
   coord: 'xy' | 'uv',
+  zoom = 1,
 ): ScatterPlot {
   const data = makeBuffer(outW, outH);
   const density = new Uint32Array(outW * outH);
-  const [x0, y0, x1, y1] = CIE_BOUNDS[coord];
+  // Same frame the graticule draws with, so the cloud lands exactly on the locus
+  // and gamut triangles. Plotting against the raw bounds here while the graticule
+  // letterboxed would offset every point.
+  const frame = cieFrame(outW, outH, coord, zoom);
   let peak = 0;
 
   for (let y = 0; y < srcH; y++) {
@@ -112,8 +112,9 @@ export function renderCie(
       const sum = xyz[0] + xyz[1] + xyz[2];
       if (sum < 1e-6) continue;
       const [cx, cy] = coord === 'xy' ? xyzToXY(xyz) : xyzToUV(xyz);
-      const px = Math.floor(((cx - x0) / (x1 - x0)) * outW);
-      const py = Math.floor(outH - ((cy - y0) / (y1 - y0)) * outH);
+      const [sx, sy] = frameToScreen(frame, cx, cy);
+      const px = Math.floor(sx);
+      const py = Math.floor(sy);
       if (px < 0 || px >= outW || py < 0 || py >= outH) continue;
       const idx = py * outW + px;
       const next = (density[idx] ?? 0) + 1;
@@ -125,8 +126,7 @@ export function renderCie(
   // Tint each lit pixel by its own chromaticity, which is what makes a CIE scatter
   // readable: the colour of a point is the colour it represents.
   paintDensity(data, density, outW, outH, peak, null, (px, py) => {
-    const cx = x0 + ((px + 0.5) / outW) * (x1 - x0);
-    const cy = y0 + ((outH - py - 0.5) / outH) * (y1 - y0);
+    const [cx, cy] = screenToFrame(frame, px + 0.5, py + 0.5);
     let rgb: [number, number, number];
     if (coord === 'xy') {
       rgb = [cx, cy, Math.max(0, 1 - cx - cy)];

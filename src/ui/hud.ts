@@ -1,7 +1,7 @@
 import type { ColorSpaceInfo, RangeDiagnosis } from '../core/range-detector';
 import type { QualityTier } from '../core/perf-governor';
 import type { ScopeMode } from '../gpu/scope-renderer';
-import { panelsForLayout, type HudState, type Layout } from './settings';
+import { assignSlot, resolvePanels, type HudState, type Layout } from './settings';
 
 export interface PanelTargets {
   mode: ScopeMode;
@@ -12,6 +12,8 @@ export interface PanelTargets {
 export interface HudHandlers {
   onStateChange(patch: Partial<HudState>): void;
   onLayoutChange(layout: Layout): void;
+  /** A cell's scope was reassigned by the user. */
+  onPanelsChange(layout: Layout, panels: ScopeMode[]): void;
   onClose(): void;
   onOpenPip(): void;
   onToggleLock(): void;
@@ -126,8 +128,13 @@ const STYLE = `
   .cell canvas.grat { pointer-events: none; }
   .cell .tag {
     position: absolute; top: 2px; right: 4px; z-index: 2;
-    font-size: 9px; color: #ffffff38; pointer-events: none;
+    font: inherit; font-size: 9px; color: #ffffff59;
+    background: #0d1117cc; border: 1px solid #ffffff1a; border-radius: 3px;
+    padding: 0 1px; max-width: 70px; cursor: pointer;
   }
+  .cell .tag:hover { color: #cfe0ea; border-color: #ffffff40; }
+  .grid.single .cell .tag { opacity: 0.45; }
+  .grid.single .cell .tag:hover { opacity: 1; }
 
   /* ---- options, collapsible ------------------------------------------- */
   details.options {
@@ -430,18 +437,32 @@ export class Hud {
     const root = this.root;
     if (!root) return;
     const grid = root.querySelector('.grid') as HTMLElement;
-    const modes = panelsForLayout(layout, this.state.mode);
+    const panels = resolvePanels(layout, this.state.mode, this.state.panels);
+    const options = (Object.keys(MODE_LABELS) as ScopeMode[])
+      .map((m) => `<option value="${m}">${MODE_LABELS[m]}</option>`)
+      .join('');
 
-    grid.innerHTML = modes
+    grid.innerHTML = panels
       .map(
-        (m) =>
-          `<div class="cell" data-mode="${m}">
+        (m, slot) =>
+          `<div class="cell" data-mode="${m}" data-slot="${slot}">
              <canvas class="gpu"></canvas>
              <canvas class="grat"></canvas>
-             <span class="tag">${MODE_LABELS[m]}</span>
+             <select class="tag" data-slot="${slot}" title="Scope in this panel">${options}</select>
            </div>`,
       )
       .join('');
+    for (const sel of Array.from(grid.querySelectorAll<HTMLSelectElement>('select.tag'))) {
+      sel.value = panels[Number(sel.dataset.slot)]!;
+      sel.addEventListener('change', () => {
+        const slot = Number(sel.dataset.slot);
+        const picked = sel.value as ScopeMode;
+        const current = resolvePanels(this.state.layout, this.state.mode, this.state.panels);
+        const next = assignSlot(current, slot, picked);
+        this.state = { ...this.state, panels: { ...this.state.panels, [this.state.layout]: next } };
+        this.handlers.onPanelsChange(this.state.layout, next);
+      });
+    }
 
     this.canvases.clear();
     for (const cell of Array.from(grid.querySelectorAll<HTMLElement>('.cell'))) {
@@ -460,6 +481,13 @@ export class Hud {
     }
     for (const btn of Array.from(root.querySelectorAll<HTMLButtonElement>('#layouts button'))) {
       btn.setAttribute('aria-pressed', btn.dataset.layout === this.state.layout ? 'true' : 'false');
+    }
+    // The per-cell pickers are rebuilt by buildCells; this keeps them correct
+    // after a state-only update that did not rebuild the grid.
+    const panels = resolvePanels(this.state.layout, this.state.mode, this.state.panels);
+    for (const sel of Array.from(root.querySelectorAll<HTMLSelectElement>('select.tag'))) {
+      const slot = Number(sel.dataset.slot);
+      if (panels[slot]) sel.value = panels[slot]!;
     }
   }
 

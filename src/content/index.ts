@@ -296,6 +296,16 @@ function buildHandlers(): HudHandlers {
       }
       refreshHud();
     },
+    onPanelsChange(layout, panels) {
+      state = { ...state, layout, panels: { ...state.panels, [layout]: panels } };
+      void saveSettings(state);
+      // Same order as onLayoutChange: rebuild cells first, then hand the new
+      // canvases to the controller. Handing over stale canvases leaves a panel
+      // drawing into an element that is no longer in the document.
+      activeHud()?.relayout(layout);
+      controller?.setTargets(activeHud()?.panelCanvases() ?? []);
+      controller?.setOptionsFor(optionsForMode);
+    },
     onLayoutChange(layout: Layout) {
       state = { ...state, layout };
       void saveSettings(state);

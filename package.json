@@ -15,11 +15,12 @@
     "verify": "pnpm harness && node scripts/verify-harness.mjs",
     "verify:headed": "node scripts/verify-harness.mjs --headed",
     "verify:e2e": "node scripts/verify-e2e.mjs",
-    "verify:all": "pnpm build && pnpm test && node scripts/verify-manifest.mjs && node scripts/verify-e2e.mjs && node scripts/verify-layout.mjs && node scripts/verify-scatter.mjs && node scripts/verify-cie-fill.mjs && node scripts/verify-ire.mjs",
+    "verify:all": "pnpm build && pnpm test && node scripts/verify-manifest.mjs && node scripts/verify-e2e.mjs && node scripts/verify-layout.mjs && node scripts/verify-cie-ui.mjs && node scripts/verify-scatter.mjs && node scripts/verify-cie-fill.mjs && node scripts/verify-ire.mjs",
     "icons": "node scripts/make-icons.mjs",
     "bench:upload": "node scripts/bench-upload.mjs",
     "verify:ui": "node scripts/verify-layout.mjs",
-    "verify:scatter": "node scripts/verify-scatter.mjs && node scripts/verify-cie-fill.mjs"
+    "verify:scatter": "node scripts/verify-scatter.mjs && node scripts/verify-cie-fill.mjs",
+    "verify:cie": "node scripts/verify-cie-ui.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",

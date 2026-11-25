@@ -4,7 +4,7 @@ import { smoothOpenSpline } from '../core/color/spline';
 import { linearToSrgb, xyToLinearSrgb } from '../core/color/transfer';
 import type { PrimariesId } from '../core/color/primaries';
 import { axisToUnit, legalBands, tickValues, unitSuffix } from '../core/scale/units';
-import { CIE_BOUNDS } from '../core/scopes/reference';
+import { CIE_BOUNDS, cieFrame, frameToScreen, screenToFrame, type CieFrame } from '../core/color/cie-frame';
 import type { ScopeOptions } from '../gpu/scope-renderer';
 
 /**
@@ -234,9 +234,9 @@ export function xyToScreen(
   w: number,
   h: number,
   coord: 'xy' | 'uv',
+  zoom = 1,
 ): [number, number] {
-  const [x0, y0, x1, y1] = CIE_BOUNDS[coord];
-  return [((x - x0) / (x1 - x0)) * w, h - ((y - y0) / (y1 - y0)) * h];
+  return frameToScreen(cieFrame(w, h, coord, zoom), x, y);
 }
 
 export function screenToXy(
@@ -245,9 +245,9 @@ export function screenToXy(
   w: number,
   h: number,
   coord: 'xy' | 'uv',
+  zoom = 1,
 ): [number, number] {
-  const [x0, y0, x1, y1] = CIE_BOUNDS[coord];
-  return [x0 + (px / w) * (x1 - x0), y0 + ((h - py) / h) * (y1 - y0)];
+  return screenToFrame(cieFrame(w, h, coord, zoom), px, py);
 }
 
 function chartToScreen(
@@ -256,8 +256,11 @@ function chartToScreen(
   w: number,
   h: number,
   coord: 'xy' | 'uv',
+  zoom = 1,
 ): [number, number] {
-  return coord === 'xy' ? xyToScreen(x, y, w, h, 'xy') : xyToScreen(...xyToUv(x, y), w, h, 'uv');
+  return coord === 'xy'
+    ? xyToScreen(x, y, w, h, 'xy', zoom)
+    : xyToScreen(...xyToUv(x, y), w, h, 'uv', zoom);
 }
 
 /** Far-red tail, in nm: where the outline starts bending toward violet. */
@@ -360,7 +363,11 @@ export function drawCieGraticule(
   // the longest on-screen segment so the curve is equally smooth in a 275 px
   // grid cell and a 1100 px single view; a fixed count was either jagged or
   // wasteful depending on panel size.
-  const screen = CIE1931_LOCUS.map((p) => chartToScreen(p[0], p[1], w, h, o.coord));
+  // One frame for every element in this graticule: the locus, the gamut
+  // triangles, the white point and the ticks must all agree, or the diagram is
+  // internally inconsistent even when each piece looks right on its own.
+  const frame = cieFrame(w, h, o.coord, o.zoom);
+  const screen = CIE1931_LOCUS.map((p) => chartToScreen(p[0], p[1], w, h, o.coord, o.zoom));
   const pts = smoothOpenSpline(screen, locusSubdivisions(screen));
 
   ctx.beginPath();
@@ -430,7 +437,7 @@ export function drawCieGraticule(
     rec2020: 'Rec.2020',
   };
   for (const id of o.gamuts) {
-    const tri = gamutTriangle(id).map((p) => chartToScreen(p[0], p[1], w, h, o.coord));
+    const tri = gamutTriangle(id).map((p) => chartToScreen(p[0], p[1], w, h, o.coord, o.zoom));
     ctx.beginPath();
     tri.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
     ctx.closePath();
@@ -443,7 +450,7 @@ export function drawCieGraticule(
   }
 
   const white = o.coord === 'xy' ? ([0.3127, 0.329] as const) : xyToUv(0.3127, 0.329);
-  const [wx, wy] = xyToScreen(white[0], white[1], w, h, o.coord);
+  const [wx, wy] = xyToScreen(white[0], white[1], w, h, o.coord, o.zoom);
   ctx.strokeStyle = '#e8e8e8';
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -452,12 +459,79 @@ export function drawCieGraticule(
   ctx.moveTo(wx, wy - 5);
   ctx.lineTo(wx, wy + 5);
   ctx.stroke();
+  drawCieAxes(ctx, frame, h);
+
   ctx.fillStyle = TEXT;
   ctx.fillText(
-    `D65 · ${o.coord === 'xy' ? 'CIE 1931 xy' : "CIE 1976 u'v'"} · ${o.primaries}`,
+    `D65 · ${o.coord === 'xy' ? 'CIE 1931 xy' : "CIE 1976 u'v'"} · ${o.primaries}` +
+      (o.zoom > 1 ? ` · ${o.zoom}x` : ''),
     8,
     14,
   );
+}
+
+/**
+ * Chromaticity axes for the CIE plot.
+ *
+ * A chromaticity diagram without coordinates is unreadable for measurement: the
+ * user can see where a point sits relative to the gamut triangles but cannot say
+ * what its chromaticity is. Ticks follow the frame's equal axis scale, so they
+ * stay correct at any panel size and while zoomed.
+ *
+ * The step is chosen from the visible span so there are always a handful of
+ * labelled ticks, never a dense comb.
+ */
+function drawCieAxes(ctx: CanvasRenderingContext2D, frame: CieFrame, h: number): void {
+  const spanX = frame.x1 - frame.x0;
+  const spanY = frame.y1 - frame.y0;
+  const stepFor = (span: number): number => {
+    for (const s of [0.2, 0.1, 0.05, 0.02, 0.01, 0.005]) {
+      if (span / s <= 8) return s;
+    }
+    return 0.002;
+  };
+  const stepX = stepFor(spanX);
+  const stepY = stepFor(spanY);
+  const decimals = Math.max(1, Math.ceil(-Math.log10(Math.min(stepX, stepY))));
+
+  ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textBaseline = 'middle';
+  ctx.strokeStyle = GRID;
+  ctx.lineWidth = 1;
+
+  // Vertical gridlines and their x labels, along the bottom of the plot box.
+  ctx.textAlign = 'center';
+  const firstX = Math.ceil(frame.x0 / stepX) * stepX;
+  for (let v = firstX; v <= frame.x1 + 1e-9; v += stepX) {
+    const [px] = frameToScreen(frame, v, frame.y0);
+    if (px < frame.left - 0.5 || px > frame.left + frame.width + 0.5) continue;
+    ctx.beginPath();
+    ctx.moveTo(px, frame.top);
+    ctx.lineTo(px, frame.top + frame.height);
+    ctx.stroke();
+    ctx.fillStyle = TEXT;
+    ctx.fillText(v.toFixed(decimals), px, h - 6);
+  }
+
+  // Horizontal gridlines and their y labels, down the left edge of the plot box.
+  ctx.textAlign = 'right';
+  const firstY = Math.ceil(frame.y0 / stepY) * stepY;
+  for (let v = firstY; v <= frame.y1 + 1e-9; v += stepY) {
+    const [, py] = frameToScreen(frame, frame.x0, v);
+    if (py < frame.top - 0.5 || py > frame.top + frame.height + 0.5) continue;
+    ctx.beginPath();
+    ctx.moveTo(frame.left, py);
+    ctx.lineTo(frame.left + frame.width, py);
+    ctx.stroke();
+    ctx.fillStyle = TEXT;
+    ctx.fillText(v.toFixed(decimals), frame.left - 4, py);
+  }
+
+  // Axis names, in the two free corners.
+  ctx.textAlign = 'left';
+  ctx.fillStyle = TEXT;
+  ctx.fillText('x', frame.left + frame.width + 4, h - 6);
+  ctx.fillText('y', 4, frame.top - 2);
 }
 
 /**

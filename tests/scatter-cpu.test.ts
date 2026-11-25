@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { LUMA } from '../src/core/color/matrices';
+import { cieFrame, frameToScreen } from '../src/core/color/cie-frame';
 import { renderCie, renderVectorscope, type ScatterPlot } from '../src/gpu/scatter-cpu';
 
 /**
@@ -118,9 +119,12 @@ describe('renderCie', () => {
     const plot = renderCie(frame([[255, 255, 255]]), 1, 1, 200, 200, 'rec709', 'xy');
     const c = centroid(plot);
     expect(c.total).toBeGreaterThan(0);
-    // D65 is at (0.3127, 0.329) within bounds 0.8 x 0.9.
-    expect(c.x / 200).toBeCloseTo(0.3127 / 0.8, 1);
-    expect((200 - c.y) / 200).toBeCloseTo(0.329 / 0.9, 1);
+    const f = cieFrame(200, 200, 'xy');
+    const [dx, dy] = frameToScreen(f, 0.3127, 0.329);
+    // Bins are floored to whole pixels, so the centroid sits within one pixel of
+    // the exact mapped position.
+    expect(Math.abs(c.x - dx)).toBeLessThan(1.5);
+    expect(Math.abs(c.y - dy)).toBeLessThan(1.5);
   });
 
   it('separates the primaries', () => {
@@ -130,10 +134,17 @@ describe('renderCie', () => {
       [0, 0, 255],
     ]);
     const plot = renderCie(img, 3, 1, 255, 255, 'rec709', 'xy');
-    // Rec.709 primaries in xy, mapped through bounds 0..0.8 / 0..0.9.
-    expect(litNear(plot, (0.64 / 0.8) * 255, 255 - (0.33 / 0.9) * 255)).toBe(true);
-    expect(litNear(plot, (0.3 / 0.8) * 255, 255 - (0.6 / 0.9) * 255)).toBe(true);
-    expect(litNear(plot, (0.15 / 0.8) * 255, 255 - (0.06 / 0.9) * 255)).toBe(true);
+    // Positions come from the shared letterboxed frame, not from stretching the
+    // bounds to the canvas: axes must be 1:1 or the horseshoe is distorted.
+    const f = cieFrame(255, 255, 'xy');
+    for (const [x, y] of [
+      [0.64, 0.33],
+      [0.3, 0.6],
+      [0.15, 0.06],
+    ] as const) {
+      const [px, py] = frameToScreen(f, x, y);
+      expect(litNear(plot, px, py, 3)).toBe(true);
+    }
   });
 
   it('ignores black, which has no chromaticity', () => {
@@ -164,7 +175,9 @@ describe('renderCie', () => {
     const plot = renderCie(frame([[255, 255, 255]]), 1, 1, 200, 200, 'rec709', 'uv');
     const c = centroid(plot);
     expect(c.total).toBeGreaterThan(0);
-    expect(c.x / 200).toBeCloseTo(0.1978 / 0.62, 1);
-    expect((200 - c.y) / 200).toBeCloseTo(0.4683 / 0.6, 1);
+    const f = cieFrame(200, 200, 'uv');
+    const [dx, dy] = frameToScreen(f, 0.1978, 0.4683);
+    expect(Math.abs(c.x - dx)).toBeLessThan(1.5);
+    expect(Math.abs(c.y - dy)).toBeLessThan(1.5);
   });
 });

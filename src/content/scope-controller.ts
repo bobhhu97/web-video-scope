@@ -428,7 +428,7 @@ export class ScopeController {
             LUMA[opts.matrix],
             opts.zoom,
           )
-        : renderCie(packed, analysis.width, analysis.height, dprW, dprH, opts.primaries, opts.coord);
+        : renderCie(packed, analysis.width, analysis.height, dprW, dprH, opts.primaries, opts.coord, opts.zoom);
       ctx.putImageData(new ImageData(plot.data, plot.width, plot.height), 0, 0);
       this.drawScatterGraticule(t, opts);
     }

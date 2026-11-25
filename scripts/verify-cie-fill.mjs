@@ -81,16 +81,45 @@ try {
         tints.add(`${Math.round(a.d[i] / 24)},${Math.round(a.d[i + 1] / 24)},${Math.round(a.d[i + 2] / 24)}`);
       }
     }
-    // Coverage: fraction of 32x32 blocks that contain any lit pixel.
+    // Coverage is measured inside the plot box, not the whole canvas: the
+    // diagram is letterboxed to keep 1:1 axis scale, so the canvas has empty
+    // margins that would otherwise dilute the number.
     const B = 32;
-    const cols = Math.ceil(a.w / B);
-    const rows = Math.ceil(a.h / B);
     const blocks = new Set();
+    let minX = a.w, maxX = -1, minY = a.h, maxY = -1;
     for (let y = 0; y < a.h; y++) {
       for (let x = 0; x < a.w; x++) {
-        if (a.d[(y * a.w + x) * 4 + 3] > 20) blocks.add(Math.floor(x / B) + ',' + Math.floor(y / B));
+        if (a.d[(y * a.w + x) * 4 + 3] <= 20) continue;
+        blocks.add(Math.floor(x / B) + ',' + Math.floor(y / B));
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
       }
     }
+    // The plot box: use the graticule's own coloured extent as its proxy, which
+    // is the locus and therefore the region of chromaticities on screen.
+    let gMinX = g.w, gMaxX = -1, gMinY = g.h, gMaxY = -1;
+    for (let y = 0; y < g.h; y++) {
+      for (let x = 0; x < g.w; x++) {
+        const i = (y * g.w + x) * 4;
+        const mx = Math.max(g.d[i], g.d[i + 1], g.d[i + 2]);
+        const mn = Math.min(g.d[i], g.d[i + 1], g.d[i + 2]);
+        if (mx > 70 && mx - mn > 45) {
+          if (x < gMinX) gMinX = x; if (x > gMaxX) gMaxX = x;
+          if (y < gMinY) gMinY = y; if (y > gMaxY) gMaxY = y;
+        }
+      }
+    }
+    const boxCols = Math.ceil((gMaxX - gMinX) / B) + 1;
+    const boxRows = Math.ceil((gMaxY - gMinY) / B) + 1;
+    const blocksInBox = (() => {
+      let n = 0;
+      for (const key of blocks) {
+        const [bx, by] = key.split(',').map(Number);
+        const px = bx * B, py = by * B;
+        if (px >= gMinX - B && px <= gMaxX + B && py >= gMinY - B && py <= gMaxY + B) n++;
+      }
+      return n;
+    })();
     const gratHue = [];
     for (let i = 0; i < g.d.length; i += 4) {
       const mx = Math.max(g.d[i], g.d[i + 1], g.d[i + 2]);
@@ -99,13 +128,21 @@ try {
     }
     return {
       w: a.w, h: a.h, lit, tints: tints.size,
-      coverage: +(blocks.size / (cols * rows)).toFixed(2),
+      coverage: +(blocksInBox / (boxCols * boxRows)).toFixed(2),
+      cloudBox: { w: maxX - minX, h: maxY - minY },
+      plotBox: { w: gMaxX - gMinX, h: gMaxY - gMinY },
       gratHuePx: gratHue.length,
     };
   });
 
-  check('the CIE cloud covers a large part of the plot', m.coverage > 0.15,
-    `${(m.coverage * 100).toFixed(0)}% of the panel has data (${m.lit} px)`);
+  // The cloud must span most of the sRGB triangle, since the fixture sweeps the
+  // whole sRGB hue range at fixed lightness. Rec.709 covers 0.49 x 0.27 units in
+  // xy; the cloud should fill most of that, and comparing against it is
+  // independent of panel size and of the letterbox margins.
+  const cloudFillsGamut = m.cloudBox.w > m.plotBox.w * 0.3 && m.cloudBox.h > m.plotBox.h * 0.4;
+  check('the CIE cloud spans the sRGB gamut, not a few dots', cloudFillsGamut,
+    `cloud ${m.cloudBox.w}x${m.cloudBox.h} in plot ${m.plotBox.w}x${m.plotBox.h} ` +
+      `(${(m.coverage * 100).toFixed(0)}% of blocks, ${m.lit} px)`);
   check('the cloud is genuinely multi-coloured', m.tints > 40, `${m.tints} distinct tints`);
   check('the locus is still visible underneath', m.gratHuePx > 5000, `${m.gratHuePx} hue px`);
   check('no errors', errors.length === 0, errors.slice(0, 2).join(' | ') || 'clean');

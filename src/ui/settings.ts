@@ -27,6 +27,14 @@ export interface HudState {
    */
   signalMode: 'display' | 'raw';
   gamuts: PrimariesId[];
+  /**
+   * Per-layout panel assignment, when the user has customised it.
+   *
+   * Absent means "use the default for that layout". Stored per layout so that
+   * customising the 4-up view does not disturb the 3-up one, and so that
+   * switching back and forth keeps the user's choice.
+   */
+  panels: Partial<Record<Layout, ScopeMode[]>>;
   /** Analysis fps cap; the governor overrides this while unlocked. */
   analysisFps: number;
   /** null = follow the governor, a number = user-pinned quality tier. */
@@ -46,6 +54,7 @@ export const DEFAULT_STATE: HudState = {
   coord: 'xy',
   signalMode: 'display',
   gamuts: ['rec709', 'p3'],
+  panels: {},
   analysisFps: 30,
   lockedTier: null,
   hostPosition: { left: null, top: 16, right: 16 },
@@ -71,13 +80,20 @@ export async function saveSettings(s: HudState): Promise<void> {
   }
 }
 
-/** Which panels a layout shows, in grid order. */
+/** How many panels each layout shows. */
+export const LAYOUT_SLOTS: Record<Layout, number> = {
+  single: 1,
+  pair: 2,
+  triple: 3,
+  grid: 4,
+};
+
 /**
- * Which scopes a layout shows.
+ * The default scopes for a layout.
  *
- * `single` and `pair` honour the user's picked scope; the wider layouts use a
- * fixed, useful set so that switching to four-up does not depend on what was
- * selected for the single slot.
+ * `single` honours the picked scope; the wider layouts use a fixed, useful set so
+ * that switching to four-up does not depend on what was selected for the single
+ * slot.
  */
 export function panelsForLayout(layout: Layout, picked: ScopeMode): ScopeMode[] {
   switch (layout) {
@@ -90,4 +106,39 @@ export function panelsForLayout(layout: Layout, picked: ScopeMode): ScopeMode[] 
     case 'single':
       return [picked];
   }
+}
+
+/**
+ * The scopes actually shown for a layout: the user's customisation when it is
+ * still the right length, the default otherwise.
+ *
+ * Length is checked rather than trusted because a stored assignment can outlive a
+ * change to `LAYOUT_SLOTS`, and a stale array of the wrong size would build the
+ * wrong number of cells.
+ */
+export function resolvePanels(
+  layout: Layout,
+  picked: ScopeMode,
+  overrides: Partial<Record<Layout, ScopeMode[]>> | undefined,
+): ScopeMode[] {
+  const custom = overrides?.[layout];
+  if (custom && custom.length === LAYOUT_SLOTS[layout]) return [...custom];
+  return panelsForLayout(layout, picked);
+}
+
+/**
+ * Assign a scope to one slot, keeping every slot distinct.
+ *
+ * The renderer table is keyed by scope mode, so two cells showing the same scope
+ * would fight over one renderer — one of them would render nothing. Swapping
+ * instead of duplicating also matches what a colourist means when they drag a
+ * scope somewhere it already exists.
+ */
+export function assignSlot(panels: ScopeMode[], slot: number, mode: ScopeMode): ScopeMode[] {
+  const next = [...panels];
+  const existing = next.indexOf(mode);
+  if (existing === slot) return next;
+  if (existing >= 0) next[existing] = next[slot]!;
+  next[slot] = mode;
+  return next;
 }
