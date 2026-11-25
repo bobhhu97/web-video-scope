@@ -5,7 +5,11 @@ import { ScopeRenderer, type ScopeMode, type ScopeOptions } from '../gpu/scope-r
 import { drawGraticule } from '../ui/graticule';
 import type { PanelTargets } from '../ui/hud';
 import type { PrimariesId } from '../core/color/primaries';
+import { copyFrameToPlanes, type RawPlaneTexture } from '../gpu/raw-planes';
 import DOWNSCALE_WGSL from '../gpu/shaders/downscale.wgsl?raw';
+import RAW_DOWNSCALE_WGSL from '../gpu/shaders/raw-downscale.wgsl?raw';
+
+export type SignalMode = 'display' | 'raw';
 
 export type { PanelTargets };
 
@@ -40,6 +44,10 @@ export class ScopeController {
    * change.
    */
   private lastStatsAt = 0;
+  private signalMode: SignalMode = 'display';
+  private rawPlanes: RawPlaneTexture | null = null;
+  private rawDownscaler: Downscaler | null = null;
+  private rawPending = false;
 
   constructor(
     private targets: PanelTargets[],
@@ -69,6 +77,28 @@ export class ScopeController {
     this.minIntervalMs = Math.max(0, ms);
   }
 
+  /**
+   * Switch between the compositor's display-referred pixels and the decoder's
+   * raw YUV planes.
+   *
+   * Display mode is correct for SDR Rec.709 and is nearly free. Raw mode is
+   * required for accurate code values on PQ/HLG or non-Rec.709 sources, at the
+   * cost of a frame copy plus a plane upload per analysed frame.
+   */
+  setSignalMode(mode: SignalMode): void {
+    if (mode === this.signalMode) return;
+    this.signalMode = mode;
+    this.rawPlanes?.destroy();
+    this.rawPlanes = null;
+    this.rawDownscaler?.destroy();
+    this.rawDownscaler = null;
+    for (const r of this.renderers.values()) r.setOptions({ signalKind: mode });
+  }
+
+  get mode(): SignalMode {
+    return this.signalMode;
+  }
+
   /** Analysis texture size, exposed for the HUD's resolution badge. */
   get analysisDims(): { width: number; height: number } | null {
     return this.downscaler ? { width: this.downscaler.width, height: this.downscaler.height } : null;
@@ -83,15 +113,23 @@ export class ScopeController {
 
     this.busy = true;
     try {
-      await this.ensureSignal(video);
-      if (!this.signal) return;
-      if (!this.signal.update(video.currentTime)) return;
-      this.lastAnalysisAt = now;
+      let analysis: Downscaler | null = null;
 
-      const device = this.device!;
-      const cmd = device.createCommandEncoder();
-      this.downscaler!.run(cmd, this.signal.texture);
-      device.queue.submit([cmd.finish()]);
+      if (this.signalMode === 'raw') {
+        analysis = await this.prepareRaw(video);
+        if (!analysis) return;
+      } else {
+        await this.ensureSignal(video);
+        if (!this.signal) return;
+        if (!this.signal.update(video.currentTime)) return;
+        const device = this.device!;
+        const cmd = device.createCommandEncoder();
+        this.downscaler!.run(cmd, this.signal.texture);
+        device.queue.submit([cmd.finish()]);
+        analysis = this.downscaler;
+      }
+      if (!analysis) return;
+      this.lastAnalysisAt = now;
 
       const wantStats = now - this.lastStatsAt >= 250;
       if (wantStats) this.lastStatsAt = now;
@@ -102,7 +140,7 @@ export class ScopeController {
       for (const target of this.targets) {
         const renderer = await this.rendererFor(target);
         if (!renderer) continue;
-        renderer.submit(this.downscaler!);
+        renderer.submit(analysis);
         this.drawGraticule(target, renderer);
         firstRenderer ??= renderer;
       }
@@ -113,7 +151,7 @@ export class ScopeController {
         void firstRenderer
           .readHistogram()
           .then((hist) => {
-            if (hist) this.callbacks.onDiagnosis(hist, this.downscaler!.width * this.downscaler!.height);
+            if (hist) this.callbacks.onDiagnosis(hist, analysis.width * analysis.height);
           })
           .catch(() => {});
       }
@@ -131,6 +169,46 @@ export class ScopeController {
         const canvas = gpu.context.canvas as HTMLCanvasElement;
         this.renderers.get(mode)?.resize(canvas.width, canvas.height);
       }
+    }
+  }
+
+  /**
+   * One VideoFrame wrap + one plane copy + one RGBA pack per analysed frame.
+   * Deliberately not per rendered frame: at 30 fps this is the dominant cost of
+   * raw mode, so it rides the same fps gate as everything else.
+   */
+  private async prepareRaw(video: HTMLVideoElement): Promise<Downscaler | null> {
+    if (this.rawPending) return this.rawDownscaler;
+    this.device ??= await getDevice();
+    if (this.destroyed || !this.device) return null;
+
+    if (!this.rawDownscaler) {
+      const a = analysisSize(video.videoWidth, video.videoHeight, this.preset());
+      this.rawDownscaler = new Downscaler(this.device, a.width, a.height, RAW_DOWNSCALE_WGSL);
+    }
+    if (this.rawPending) return this.rawDownscaler;
+
+    let frame: VideoFrame | null = null;
+    try {
+      frame = new VideoFrame(video);
+      this.rawPending = true;
+      const planes = await copyFrameToPlanes(frame, this.device);
+      if (this.destroyed) {
+        planes.destroy();
+        return null;
+      }
+      this.rawPlanes?.destroy();
+      this.rawPlanes = planes;
+      const cmd = this.device.createCommandEncoder();
+      this.rawDownscaler.runRaw(cmd, planes);
+      this.device.queue.submit([cmd.finish()]);
+      return this.rawDownscaler;
+    } catch {
+      // e.g. a non-I420 frame format; fall back until the next attempt.
+      return this.rawDownscaler;
+    } finally {
+      this.rawPending = false;
+      frame?.close();
     }
   }
 
@@ -198,6 +276,10 @@ export class ScopeController {
     this.downscaler = null;
     this.signal?.destroy();
     this.signal = null;
+    this.rawPlanes?.destroy();
+    this.rawPlanes = null;
+    this.rawDownscaler?.destroy();
+    this.rawDownscaler = null;
     this.device = null;
   }
 }

@@ -47,13 +47,34 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let kb = p.coeff.z;
   let zoom = p.coeff.w;
 
-  let px = textureLoad(src, vec2i(i32(gid.x), i32(gid.y)), 0).rgb;
-  let axisR = clamp(blend(px.r), 0.0, 1.0);
-  let axisG = clamp(blend(px.g), 0.0, 1.0);
-  let axisB = clamp(blend(px.b), 0.0, 1.0);
-  let axisY = kr * axisR + kg * axisG + kb * axisB;
-  let cb = (axisB - axisY) / (2.0 * (1.0 - kb));
-  let cr = (axisR - axisY) / (2.0 * (1.0 - kr));
+  let px = textureLoad(src, vec2i(i32(gid.x), i32(gid.y)), 0);
+  let raw = p.opts.w == 1u;
+
+  var axisR = 0.0;
+  var axisG = 0.0;
+  var axisB = 0.0;
+  var axisY = 0.0;
+  var cb = 0.0;
+  var cr = 0.0;
+
+  if (raw) {
+    // Raw mode: R already carries the Y code value (see raw-downscale.wgsl),
+    // so it goes straight onto the axis. Expanding it again would compress a
+    // limited-range signal twice.
+    axisY = clamp(px.r, 0.0, 1.0);
+    axisR = axisY;
+    axisG = axisY;
+    axisB = axisY;
+    cb = (px.g - 0.5) * 2.0;
+    cr = (px.b - 0.5) * 2.0;
+  } else {
+    axisR = clamp(blend(px.r), 0.0, 1.0);
+    axisG = clamp(blend(px.g), 0.0, 1.0);
+    axisB = clamp(blend(px.b), 0.0, 1.0);
+    axisY = kr * axisR + kg * axisG + kb * axisB;
+    cb = (axisB - axisY) / (2.0 * (1.0 - kb));
+    cr = (axisR - axisY) / (2.0 * (1.0 - kr));
+  }
 
   atomicAdd(&lumaHist[min(255u, u32(axisY * 255.0))], 1u);
 

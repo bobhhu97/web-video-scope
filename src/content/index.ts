@@ -23,6 +23,9 @@ import {
 import { GpuTimer } from '../core/gpu-timer';
 import { getDevice } from '../gpu/device';
 import type { AnalysisPreset } from '../gpu/downscale';
+import { Probe, formatSample } from '../ui/probe';
+import { openPipWindow, pipSupported, onPipClosed } from '../ui/pip';
+import { videoReadability, readabilityNotice, type Readability } from './readability';
 
 const HOST_ID = 'video-scopes-host';
 
@@ -33,6 +36,9 @@ let hud: Hud | null = null;
 let controller: ScopeController | null = null;
 let state: HudState = { ...DEFAULT_STATE };
 let unfollowFullscreen: (() => void) | null = null;
+let probe: Probe | null = null;
+let probedVideo: HTMLVideoElement | null = null;
+let readability: Readability = { kind: 'unknown' };
 
 let colorInfo: ColorSpaceInfo = {
   fullRange: null,
@@ -78,6 +84,7 @@ function optionsForMode(mode: ScopeMode): ScopeOptions {
     matrix: colorInfo.matrix ?? 'bt709',
     primaries: colorInfo.primaries ?? 'rec709',
     coord: state.coord,
+    signalKind: state.signalMode,
   };
 }
 
@@ -186,6 +193,7 @@ function buildController(): void {
     analysisPreset,
   );
   controller.setMinInterval(1000 / TIER_DESCRIPTION[currentTier()].fps);
+  controller.setSignalMode(state.signalMode);
 }
 
 async function enable(): Promise<void> {
@@ -199,8 +207,10 @@ async function enable(): Promise<void> {
 
   hud = new Hud(state, {
     onStateChange(patch) {
+      const modeChanged = patch.signalMode !== undefined && patch.signalMode !== state.signalMode;
       state = { ...state, ...patch };
       void saveSettings(state);
+      if (modeChanged) controller?.setSignalMode(state.signalMode);
       refreshHud();
     },
     onLayoutChange(layout: Layout) {
@@ -213,6 +223,22 @@ async function enable(): Promise<void> {
     },
     onClose() {
       void disable();
+    },
+    onOpenPip() {
+      const host = document.getElementById(HOST_ID);
+      if (!host) return;
+      if (!pipSupported()) {
+        hud?.setNotice('Picture-in-Picture needs Chrome 116+.');
+        return;
+      }
+      openPipWindow(host)
+        .then((win) => {
+          // Stop following fullscreen while detached, then resume on close.
+          unfollowFullscreen?.();
+          unfollowFullscreen = null;
+          onPipClosed(win, host, document.documentElement);
+        })
+        .catch((e: Error) => hud?.setNotice(`PiP failed: ${e.message}`));
     },
     onToggleLock() {
       const locked = state.lockedTier === null;
@@ -227,14 +253,26 @@ async function enable(): Promise<void> {
 
   buildController();
 
+  probe = new Probe(
+    (sample) => hud?.setProbe(formatSample(sample, state.units, effectiveRange)),
+    () => ({ matrix: colorInfo.matrix ?? 'bt709', range: effectiveRange }),
+  );
+
   detector = new VideoDetector((video) => {
     loop?.stop();
     loop = null;
+    if (probedVideo && probe) probe.disable(probedVideo);
+    probedVideo = video;
     if (!video) {
+      readability = { kind: 'unknown' };
       hud?.setNotice('No video found on this page.');
       return;
     }
-    hud?.setNotice(null);
+    // Tell the user *why* a scope would be empty, instead of showing a blank
+    // panel that looks broken.
+    readability = videoReadability(video);
+    hud?.setNotice(readabilityNotice(readability, true));
+    if (readability.kind === 'readable') probe?.enable(video);
     loop = new FrameLoop(video, onFrame);
     loop.setTargetFps(TIER_DESCRIPTION[currentTier()].fps);
     loop.start();
@@ -255,6 +293,9 @@ async function disable(): Promise<void> {
   controller = null;
   unfollowFullscreen?.();
   unfollowFullscreen = null;
+  if (probedVideo && probe) probe.disable(probedVideo);
+  probe = null;
+  probedVideo = null;
   hud?.unmount();
   hud = null;
   rangeDetector.reset();

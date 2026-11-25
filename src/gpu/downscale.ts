@@ -87,6 +87,39 @@ export class Downscaler implements AnalysisTexture {
     });
   }
 
+  /**
+   * Raw I420 variant: samples the Y and interleaved-UV planes and packs them
+   * into the same rgba8 analysis texture the display path produces.
+   */
+  runRaw(
+    encoder: GPUCommandEncoder,
+    planes: { y: GPUTexture; u: GPUTexture; v: GPUTexture },
+  ): void {
+    const bind = this.device.createBindGroup({
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: planes.y.createView() },
+        { binding: 1, resource: planes.u.createView() },
+        { binding: 2, resource: planes.v.createView() },
+        { binding: 3, resource: this.sampler },
+      ],
+    });
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: this.texture.createView(),
+          loadOp: 'clear',
+          storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        },
+      ],
+    });
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(0, bind);
+    pass.draw(3);
+    pass.end();
+  }
+
   /** Draw the source texture into the analysis target. Costs one fullscreen triangle. */
   run(encoder: GPUCommandEncoder, source: GPUTexture): void {
     const bind = this.device.createBindGroup({

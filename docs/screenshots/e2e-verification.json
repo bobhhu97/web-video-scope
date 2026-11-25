@@ -1,5 +1,5 @@
 {
-  "when": "2026-11-25T04:42:50.273Z",
+  "when": "2026-11-25T04:50:01.158Z",
   "results": [
     {
       "name": "host page has a playing video with metadata",
@@ -27,7 +27,7 @@
     {
       "name": "perf badge shows a live frame rate",
       "ok": true,
-      "detail": "20 fps · 1.8 ms · auto:1"
+      "detail": "1 fps · 12.9 ms · auto:1"
     },
     {
       "name": "host is position:fixed with the documented z-index",
@@ -47,7 +47,7 @@
     {
       "name": "analysis reaches a steady frame rate near the source ceiling",
       "ok": true,
-      "detail": "32 fps · 1.6 ms · auto:0"
+      "detail": "31 fps · 1.7 ms · auto:0"
     },
     {
       "name": "state persists visible=true to chrome.storage",
@@ -62,6 +62,25 @@
       "name": "state persists visible=false after closing",
       "ok": true,
       "detail": "false"
+    },
+    {
+      "name": "raw I420 plane mode renders a trace",
+      "ok": true,
+      "detail": "323 lit px"
+    },
+    {
+      "name": "raw mode keeps a usable frame rate",
+      "ok": true,
+      "detail": "22 fps · 2.3 ms · auto:1"
+    },
+    {
+      "name": "Alt + pointer reports a pixel reading",
+      "ok": true,
+      "detail": "Y 53 IRE · code 133,133,133 · Cb 0.000 Cr 0.000 · (640,360)"
+    },
+    {
+      "name": "PiP control is exposed",
+      "ok": true
     },
     {
       "name": "no uncaught errors or WebGPU validation errors",

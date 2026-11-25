@@ -226,6 +226,98 @@ try {
   });
   check('state persists visible=false after closing', afterOff === false, String(afterOff));
 
+  // ---- raw plane mode -----------------------------------------------------
+  // Re-open and switch to the decoder's YUV planes. This path exercises
+  // VideoFrame.copyTo + plane upload, which display mode never touches.
+  await page.keyboard.down('Alt');
+  await page.keyboard.press('KeyS');
+  await page.keyboard.up('Alt');
+  await page.waitForFunction(
+    () => document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.panel') !== null,
+    { timeout: 10000 },
+  );
+
+  await page.evaluate(() => {
+    const root = document.getElementById('video-scopes-host').shadowRoot;
+    const sel = root.getElementById('signal');
+    sel.value = 'raw';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+
+  let rawLit = 0;
+  for (let i = 0; i < 60 && rawLit <= 100; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    rawLit = await page.evaluate(async () => {
+      const root = document.getElementById('video-scopes-host')?.shadowRoot;
+      const canvas = root?.querySelector('canvas.gpu');
+      if (!canvas) return 0;
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const bmp = await createImageBitmap(canvas);
+      const oc = new OffscreenCanvas(bmp.width, bmp.height);
+      const c = oc.getContext('2d');
+      c.drawImage(bmp, 0, 0);
+      const d = c.getImageData(0, 0, bmp.width, bmp.height).data;
+      let n = 0;
+      for (let k = 0; k < d.length; k += 4) if (d[k] + d[k + 1] + d[k + 2] > 40) n++;
+      return n;
+    });
+  }
+  check('raw I420 plane mode renders a trace', rawLit > 100, `${rawLit} lit px`);
+
+  const rawPerf = await page.evaluate(() => {
+    const root = document.getElementById('video-scopes-host')?.shadowRoot;
+    return root?.getElementById('perf')?.textContent;
+  });
+  check('raw mode keeps a usable frame rate', Number((rawPerf ?? '').match(/(\d+) fps/)?.[1] ?? 0) >= 10, rawPerf);
+
+  // ---- pixel probe -------------------------------------------------------
+  const probeText = await page.evaluate(async () => {
+    const root = document.getElementById('video-scopes-host').shadowRoot;
+    const video = document.querySelector('video');
+    const rect = video.getBoundingClientRect();
+    // Alt+pointermove over the middle of the video is the probe gesture.
+    video.dispatchEvent(
+      new PointerEvent('pointermove', {
+        altKey: true,
+        bubbles: true,
+        clientX: rect.left + rect.width * 0.5,
+        clientY: rect.top + rect.height * 0.5,
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 400));
+    const el = root.getElementById('probe');
+    return {
+      hidden: el.hidden,
+      text: el.textContent,
+      notice: root.getElementById('notice')?.textContent,
+      noticeHidden: root.getElementById('notice')?.hidden,
+      // Re-run the probe a few times in case the first gesture was swallowed.
+      retries: (() => {
+        const out = [];
+        for (let i = 0; i < 3; i++) {
+          video.dispatchEvent(new PointerEvent('pointermove', {
+            altKey: true, bubbles: true,
+            clientX: rect.left + rect.width * (0.3 + i * 0.2),
+            clientY: rect.top + rect.height * 0.5,
+          }));
+        }
+        return out.length;
+      })(),
+    };
+  });
+  if (probeText.hidden) console.log('  [probe diag]', JSON.stringify(probeText));
+  check(
+    'Alt + pointer reports a pixel reading',
+    !probeText.hidden && /Y \d+/.test(probeText.text ?? ''),
+    probeText.text || `hidden (notice: ${probeText.notice})`,
+  );
+
+  const pipBtn = await page.evaluate(() => {
+    const root = document.getElementById('video-scopes-host').shadowRoot;
+    return !!root.getElementById('pip');
+  });
+  check('PiP control is exposed', pipBtn);
+
   check('no uncaught errors or WebGPU validation errors', errors.length === 0, errors.slice(0, 2).join(' | '));
 } finally {
   await browser.close();

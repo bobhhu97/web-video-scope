@@ -17,6 +17,11 @@ export interface HudState {
   rangeMode: RangeMode;
   /** CIE plot coordinate system; unused by the other scopes. */
   coord: 'xy' | 'uv';
+  /**
+   * 'display' reads the compositor's pixels (cheap, correct for SDR Rec.709).
+   * 'raw' reads the decoder's I420 planes (exact code values, needed for HDR).
+   */
+  signalMode: 'display' | 'raw';
   gamuts: PrimariesId[];
   /** Analysis fps cap; the governor overrides this while unlocked. */
   analysisFps: number;
@@ -35,6 +40,7 @@ export const DEFAULT_STATE: HudState = {
   zoom: 1,
   rangeMode: 'auto',
   coord: 'xy',
+  signalMode: 'display',
   gamuts: ['rec709', 'p3'],
   analysisFps: 30,
   lockedTier: null,

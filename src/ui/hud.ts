@@ -13,6 +13,8 @@ export interface HudHandlers {
   onStateChange(patch: Partial<HudState>): void;
   onLayoutChange(layout: Layout): void;
   onClose(): void;
+  /** Detach the panel into a Document Picture-in-Picture window. */
+  onOpenPip(): void;
   /** User clicked the quality badge: pin to the current tier, or unpin. */
   onToggleLock(): void;
 }
@@ -184,6 +186,13 @@ export class Hud {
     el.className = `badge ${locked ? 'locked' : ''}`;
   }
 
+  setProbe(text: string | null): void {
+    const el = this.root?.getElementById('probe');
+    if (!el) return;
+    el.hidden = text === null;
+    if (text !== null) el.textContent = text;
+  }
+
   setNotice(text: string | null): void {
     const el = this.root?.getElementById('notice');
     if (!el) return;
@@ -215,9 +224,11 @@ export class Hud {
           <span class="badge warn" id="warn" hidden></span>
           <span class="spacer"></span>
           <span class="badge" id="perf">–</span>
+          <button id="pip" title="Open in a always-on-top window">⧉</button>
           <button id="close" title="Close (Alt+S)">✕</button>
         </header>
         <div class="badge warn" id="notice" hidden style="margin:6px 8px 0"></div>
+        <div class="badge" id="probe" hidden style="margin:6px 8px 0"></div>
         <div class="grid ${this.state.layout}"></div>
         <footer>
           <label>units
@@ -247,6 +258,12 @@ export class Hud {
             <select id="coord">
               <option value="xy">1931 xy</option>
               <option value="uv">1976 u'v'</option>
+            </select>
+          </label>
+          <label title="raw reads decoder YUV planes; exact code values for HDR">signal
+            <select id="signal">
+              <option value="display">display</option>
+              <option value="raw">raw</option>
             </select>
           </label>
           <label>gain <input id="gain" type="range" min="0.2" max="3" step="0.1"></label>
@@ -299,6 +316,11 @@ export class Hud {
     root.getElementById('coord')?.addEventListener('change', (e) => {
       this.handlers.onStateChange({ coord: (e.target as HTMLSelectElement).value as HudState['coord'] });
     });
+    root.getElementById('signal')?.addEventListener('change', (e) => {
+      this.handlers.onStateChange({
+        signalMode: (e.target as HTMLSelectElement).value as HudState['signalMode'],
+      });
+    });
     root.getElementById('gain')?.addEventListener('input', (e) => {
       this.handlers.onStateChange({ gain: Number((e.target as HTMLInputElement).value) });
     });
@@ -306,6 +328,7 @@ export class Hud {
       this.handlers.onStateChange({ zoom: Number((e.target as HTMLInputElement).value) });
     });
     root.getElementById('perf')?.addEventListener('click', () => this.handlers.onToggleLock());
+    root.getElementById('pip')?.addEventListener('click', () => this.handlers.onOpenPip());
 
     const header = root.querySelector('header') as HTMLElement;
     let drag: { x: number; y: number; left: number; top: number } | null = null;
@@ -344,6 +367,7 @@ export class Hud {
     set('range', this.state.rangeMode);
     set('layout', this.state.layout);
     set('coord', this.state.coord);
+    set('signal', this.state.signalMode);
     set('gain', String(this.state.gain));
     set('zoom', String(this.state.zoom));
   }
