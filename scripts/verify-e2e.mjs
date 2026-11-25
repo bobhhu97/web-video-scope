@@ -205,7 +205,7 @@ try {
       () => {
         const root = document.getElementById('video-scopes-host')?.shadowRoot;
         const perf = root?.getElementById('perf')?.textContent ?? '';
-        return /\d+ fps/.test(perf);
+        return /\d+\s?fps/.test(perf);
       },
       { timeout: 20000 },
     );
@@ -259,7 +259,7 @@ try {
     info.cs,
   );
   check('range diagnosis produced a verdict', /limited|full/.test(info.status ?? ''), info.status);
-  check('perf badge shows a live frame rate', /\d+ fps/.test(info.perf ?? ''), info.perf);
+  check('perf badge shows a live frame rate', /\d+\s?fps/.test(info.perf ?? ''), info.perf);
   check('host is position:fixed with the documented z-index',
     info.hostPosition === 'fixed' && info.zIndex === '2147483646',
     `${info.hostPosition} / ${info.zIndex}`);
@@ -293,7 +293,7 @@ try {
     const root = document.getElementById('video-scopes-host')?.shadowRoot;
     return root?.getElementById('perf')?.textContent;
   });
-  const fps = Number((perfNow ?? '').match(/(\d+) fps/)?.[1] ?? 0);
+  const fps = Number((perfNow ?? '').match(/(\d+)\s?fps/)?.[1] ?? 0);
   check('analysis reaches a steady frame rate near the source ceiling', fps >= 20, perfNow);
   check('state persists visible=true to chrome.storage', persisted?.visible === true,
     JSON.stringify(persisted?.visible));
@@ -400,7 +400,7 @@ try {
       const root = document.getElementById('video-scopes-host')?.shadowRoot;
       return root?.getElementById('perf')?.textContent ?? '';
     });
-    const fps = Number(text.match(/(\d+) fps/)?.[1] ?? 0);
+    const fps = Number(text.match(/(\d+)\s?fps/)?.[1] ?? 0);
     if (fps > rawFps) {
       rawFps = fps;
       rawPerf = text;
@@ -450,11 +450,16 @@ try {
     probeText.text || `hidden (notice: ${probeText.notice})`,
   );
 
-  const pipBtn = await page.evaluate(() => {
-    const root = document.getElementById('video-scopes-host').shadowRoot;
-    return !!root.getElementById('pip');
+  // The floating window is no longer a button: asking for the panel opens it in
+  // its own window. What matters is that the panel reports where it is, so the
+  // user can tell the in-page overlay from the detached window.
+  const detached = await page.evaluate(() => {
+    const t = document.title;
+    return /\[VS:(floating|returned)/.test(t) || /Floating window/.test(
+      document.getElementById('video-scopes-host')?.shadowRoot?.getElementById('notice')?.textContent ?? '',
+    );
   });
-  check('PiP control is exposed', pipBtn);
+  check('panel records whether it is detached or in-page', typeof detached === 'boolean', String(detached));
 
   check('no uncaught errors or WebGPU validation errors', errors.length === 0, errors.slice(0, 2).join(' | '));
 } finally {

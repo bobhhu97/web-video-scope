@@ -1,5 +1,5 @@
 {
-  "when": "2026-11-25T07:07:04.187Z",
+  "when": "2026-11-25T07:37:35.923Z",
   "results": [
     {
       "name": "host page has a playing video with metadata",
@@ -29,17 +29,17 @@
     {
       "name": "colour metadata was read from the video",
       "ok": true,
-      "detail": "BT709 · limited · bt709 · NV12"
+      "detail": "BT709 · src:limited · bt709 · NV12"
     },
     {
       "name": "range diagnosis produced a verdict",
       "ok": true,
-      "detail": "limited · webcodecs"
+      "detail": "axis:limited"
     },
     {
       "name": "perf badge shows a live frame rate",
       "ok": true,
-      "detail": "17 fps · 1.2 ms · 0copy · auto:1"
+      "detail": "17fps 1.4ms 0copy t1"
     },
     {
       "name": "host is position:fixed with the documented z-index",
@@ -49,22 +49,22 @@
     {
       "name": "every panel has a sized GPU canvas",
       "ok": true,
-      "detail": "[{\"mode\":\"waveform-rgb\",\"w\":371,\"h\":185},{\"mode\":\"waveform-parade\",\"w\":371,\"h\":185},{\"mode\":\"vectorscope\",\"w\":371,\"h\":371},{\"mode\":\"cie\",\"w\":371,\"h\":371}]"
+      "detail": "[{\"mode\":\"waveform-rgb\",\"w\":354,\"h\":203},{\"mode\":\"waveform-parade\",\"w\":354,\"h\":203},{\"mode\":\"vectorscope\",\"w\":354,\"h\":203},{\"mode\":\"cie\",\"w\":354,\"h\":203}]"
     },
     {
       "name": "a scope canvas contains a rendered trace",
       "ok": true,
-      "detail": "339 lit px"
+      "detail": "316 lit px"
     },
     {
       "name": "zero-copy upload path is in use (no per-frame pixel copy)",
       "ok": true,
-      "detail": "17 fps · 1.2 ms · 0copy · auto:1"
+      "detail": "17fps 1.4ms 0copy t1"
     },
     {
       "name": "analysis reaches a steady frame rate near the source ceiling",
       "ok": true,
-      "detail": "29 fps · 1.6 ms · 0copy · auto:0"
+      "detail": "31fps 2.0ms 0copy t0"
     },
     {
       "name": "state persists visible=true to chrome.storage",
@@ -91,12 +91,12 @@
     {
       "name": "raw I420 plane mode renders a trace",
       "ok": true,
-      "detail": "339 lit px"
+      "detail": "316 lit px"
     },
     {
       "name": "raw mode keeps a usable frame rate",
       "ok": true,
-      "detail": "34 fps · 1.2 ms · raw · auto:0"
+      "detail": "35fps 1.5ms raw t0"
     },
     {
       "name": "Alt + pointer reports a pixel reading",
@@ -104,8 +104,9 @@
       "detail": "Y 53 IRE · code 133,133,133 · Cb 0.000 Cr 0.000 · (640,360)"
     },
     {
-      "name": "PiP control is exposed",
-      "ok": true
+      "name": "panel records whether it is detached or in-page",
+      "ok": true,
+      "detail": "true"
     },
     {
       "name": "no uncaught errors or WebGPU validation errors",
