@@ -48,9 +48,11 @@ describe('HUD placement', () => {
 
   const host = (): HTMLElement | null => win.document.getElementById(HOST_ID);
 
-  it('mounts the panel on Alt+S', async () => {
-    win.dispatchEvent(new win.KeyboardEvent('keydown', { altKey: true, code: 'KeyS' }));
-    await new Promise((r) => setTimeout(r, 120));
+  it('mounts the panel automatically on load', async () => {
+    // The first run opens by itself so a fresh install is discoverable.
+    // Pressing Alt+S here would close it, which is the opposite of what this
+    // suite is checking.
+    for (let i = 0; i < 40 && !host(); i++) await new Promise((r) => setTimeout(r, 50));
     expect(host()).not.toBeNull();
   });
 

@@ -224,13 +224,32 @@ function buildController(): void {
 async function enable(): Promise<void> {
   if (enabled) return;
   enabled = true;
-  state = await loadSettings();
-  state = { ...state, visible: true };
-  // Persist the open state immediately: the panel must come back after a
-  // reload, and a crash mid-session must not lose the user's choice.
-  await saveSettings(state);
 
-  hud = new Hud(state, {
+  // Mount FIRST, with whatever state we already have. Everything below this
+  // point can fail — storage, GPU init, video detection — and the panel will
+  // still be on screen showing what went wrong. Putting any `await` before the
+  // mount meant a storage hiccup produced no panel at all, which reads as a
+  // completely broken extension.
+  state = { ...state, visible: true };
+  hud = buildHud();
+  hud.mount();
+  stampTitle('hud-mounted');
+
+  // Now the optional work. Failures here degrade the scopes, not the panel.
+  try {
+    state = { ...(await loadSettings()), visible: true, layout: state.layout };
+    hud.setState(state);
+  } catch {
+    // Keep the defaults already in use.
+  }
+  void saveSettings(state);
+
+  finishEnable();
+}
+
+/** Handlers for a freshly created HUD. Split out so mount can precede I/O. */
+function buildHud(): Hud {
+  return new Hud(state, {
     onStateChange(patch) {
       const modeChanged = patch.signalMode !== undefined && patch.signalMode !== state.signalMode;
       state = { ...state, ...patch };
@@ -276,15 +295,21 @@ async function enable(): Promise<void> {
       hud?.setPerf(0, timer.lastMs, currentTier());
     },
   });
-  stampTitle('enabling');
-  hud.mount();
-  stampTitle('hud-mounted');
-  unfollowFullscreen = followFullscreen(hud.hostElement!);
+}
 
-  buildController();
-  stampTitle('controller-ready');
+/**
+ * Everything that can fail without taking the panel down with it.
+ * Called right after the HUD is mounted, so any throw still leaves a visible
+ * panel that can explain itself.
+ */
+function finishEnable(): void {
+  try {
+    unfollowFullscreen = followFullscreen(hud!.hostElement!);
 
-  probe = new Probe(
+    buildController();
+    stampTitle('controller-ready');
+
+    probe = new Probe(
     (sample) => hud?.setProbe(formatSample(sample, state.units, effectiveRange)),
     () => ({ matrix: colorInfo.matrix ?? 'bt709', range: effectiveRange }),
   );
@@ -311,9 +336,15 @@ async function enable(): Promise<void> {
     loop.start();
   });
   detector.start();
-  stampTitle(detector.video ? 'detector-video' : 'detector-novideo');
-
-  if (!detector.video) hud.setNotice('No video found on this page.');
+    stampTitle(detector.video ? 'detector-video' : 'detector-novideo');
+    if (!detector.video) hud?.setNotice('No video found on this page.');
+  } catch (e) {
+    // The panel is already on screen, so report here instead of throwing.
+    const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    hud?.setNotice(`Scopes failed to start: ${msg}`);
+    stampTitle('scopes-failed');
+    console.error('[video-scopes] finishEnable failed:', msg);
+  }
 }
 
 async function disable(): Promise<void> {
@@ -367,30 +398,45 @@ window.addEventListener('keydown', (e) => {
 
 // Restore the previous session automatically.
 void (async () => {
+  // Read settings defensively. A storage failure must not prevent the panel
+  // from appearing — that would make an infrastructure hiccup look exactly like
+  // a broken extension, which is precisely the failure mode this file has been
+  // rewritten to avoid.
+  let saved = { ...DEFAULT_STATE };
   try {
-    const saved = await loadSettings();
-    // Open automatically the first time this content script ever runs in this
-    // browser session, so a fresh install is discoverable. Afterwards the
-    // persisted flag wins: the user's decision to close the panel must survive a
-    // reload, but "never opened yet" must not look like a broken extension.
-    const KEY = 'firstRunSeen';
-    let firstRun = false;
-    try {
-      const got = await chrome.storage.session.get(KEY);
-      firstRun = !got[KEY];
-      if (firstRun) await chrome.storage.session.set({ [KEY]: true });
-    } catch {
-      // storage.session is unavailable on very old builds; fall back to the flag.
-    }
-    stampTitle(firstRun ? 'first-run' : saved.visible ? 'restoring' : 'closed');
-    if (firstRun || saved.visible) await enable();
+    saved = await loadSettings();
   } catch (e) {
-    // Content script ran but could not start. Say so on the page.
-    const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-    stampTitle('enable-failed');
-    showDiagnostic('error', msg);
-    console.error('[video-scopes] enable failed:', msg);
-    throw e;
+    console.warn('[video-scopes] settings unavailable, using defaults:', e);
+  }
+
+  // Automatic opening rule: a fresh install (or the first page of a browser
+  // session) opens once so the panel is discoverable; afterwards the persisted
+  // flag wins, so a deliberate close survives a reload.
+  let firstRun = false;
+  try {
+    const KEY = 'firstRunSeen';
+    const got = await chrome.storage.session.get(KEY);
+    firstRun = !got[KEY];
+    if (firstRun) await chrome.storage.session.set({ [KEY]: true });
+  } catch {
+    // storage.session may be unavailable; treat it as a first run so the user
+    // sees something rather than nothing.
+    firstRun = true;
+  }
+
+  if (firstRun || saved.visible) {
+    try {
+      await enable();
+    } catch (e) {
+      const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+      stampTitle('enable-failed');
+      // enable() mounts the panel first, so this only fires for failures in the
+      // mount itself — report visibly in that case.
+      showDiagnostic('error', msg);
+      console.error('[video-scopes] enable failed:', msg);
+    }
+  } else {
+    stampTitle('closed');
   }
 })();
 

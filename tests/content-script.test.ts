@@ -1,126 +1,142 @@
-/**
- * Loads the real built content script into a jsdom page and exercises the HUD
- * lifecycle. This is the closest automated equivalent to "install the unpacked
- * extension and press Alt+S", which no headless browser tool can do for MV3
- * unpacked builds.
- *
- * The HUD now renders inside a shadow root, so assertions go through
- * `host.shadowRoot` rather than the host element's own textContent.
- */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { JSDOM } from 'jsdom';
 
+/**
+ * End-to-end behaviour of the built content script in a DOM.
+ *
+ * Contract under test:
+ *  - a first run mounts the panel on its own, so a fresh install is discoverable
+ *  - Alt+S / the toolbar message toggle it open and closed
+ *  - the choice is persisted, and an explicit close survives a reload
+ *
+ * Note the earlier version of this file asserted "nothing happens on load".
+ * That was the old behaviour and it is exactly what made the extension look
+ * broken to a user who had closed the panel once.
+ */
 const BUNDLE = resolve(__dirname, '../dist/content.js');
 const HOST_ID = 'video-scopes-host';
 
-describe('built content script', () => {
-  let dom: JSDOM;
-  let win: Window & typeof globalThis;
+async function makeEnv(): Promise<{
+  win: Window & typeof globalThis;
+  store: Record<string, unknown>;
+  listeners: Array<(m: unknown) => void>;
+}> {
+  const code = existsSync(BUNDLE) ? readFileSync(BUNDLE, 'utf8') : '';
+  expect(code.length, 'run `pnpm build` first').toBeGreaterThan(0);
 
-  beforeAll(() => {
-    const code = existsSync(BUNDLE) ? readFileSync(BUNDLE, 'utf8') : '';
-    expect(code.length, 'dist/content.js must exist — run `pnpm build` first').toBeGreaterThan(0);
+  const dom = new JSDOM('<!doctype html><html><body><video></video></body></html>', {
+    runScripts: 'outside-only',
+    url: 'https://example.test/',
+    pretendToBeVisual: true,
+  });
+  const win = dom.window as unknown as Window & typeof globalThis;
 
-    dom = new JSDOM('<!doctype html><html><body></body></html>', {
-      runScripts: 'outside-only',
-      url: 'https://example.test/',
-      pretendToBeVisual: true,
-    });
-    win = dom.window as unknown as Window & typeof globalThis;
-
-    const store: Record<string, unknown> = {};
-    const listeners: Array<(m: unknown) => void> = [];
-    (win as unknown as { chrome: unknown }).chrome = {
-      runtime: {
-        onMessage: { addListener: (fn: (m: unknown) => void) => listeners.push(fn) },
-      },
-      storage: {
-        local: {
-          get: async (k: string) => ({ [k]: store[k] }),
-          set: async (o: Record<string, unknown>) => {
-            Object.assign(store, o);
-          },
+  const store: Record<string, unknown> = {};
+  const listeners: Array<(m: unknown) => void> = [];
+  (win as unknown as { chrome: unknown }).chrome = {
+    runtime: { onMessage: { addListener: (fn: (m: unknown) => void) => listeners.push(fn) } },
+    storage: {
+      local: { get: async (k: string) => ({ [k]: store[k] }), set: async (o: Record<string, unknown>) => Object.assign(store, o) },
+      session: {
+        get: async (k: string) => ({ [k]: store['s:' + k] }),
+        set: async (o: Record<string, unknown>) => {
+          for (const [k, v] of Object.entries(o)) store['s:' + k] = v;
         },
       },
-    };
-    (win as unknown as { __listeners: typeof listeners }).__listeners = listeners;
-    (win as unknown as { __store: typeof store }).__store = store;
-
-    win.eval(code);
-  });
-
-  const host = (): HTMLElement | null => win.document.getElementById(HOST_ID);
-  const toggle = (): void => {
-    win.dispatchEvent(new win.KeyboardEvent('keydown', { altKey: true, code: 'KeyS' }));
+    },
   };
 
-  it('registers a runtime message listener', () => {
-    const listeners = (win as unknown as { __listeners: unknown[] }).__listeners;
+  win.eval(code);
+  await new Promise((r) => setTimeout(r, 250));
+  return { win, store, listeners };
+}
+
+const host = (win: Window & typeof globalThis): HTMLElement | null =>
+  win.document.getElementById(HOST_ID);
+
+async function waitFor(fn: () => boolean, ms = 3000): Promise<void> {
+  const end = Date.now() + ms;
+  while (Date.now() < end && !fn()) await new Promise((r) => setTimeout(r, 50));
+}
+
+describe('built content script', () => {
+  it('registers a runtime message listener', async () => {
+    const { listeners } = await makeEnv();
     expect(listeners.length).toBeGreaterThan(0);
   });
 
-  it('does not inject anything on load when the last session was closed', () => {
-    expect(host()).toBeNull();
+  it('opens by itself on a first run', async () => {
+    const { win } = await makeEnv();
+    await waitFor(() => host(win) !== null);
+    expect(host(win)).not.toBeNull();
   });
 
-  it('mounts a fixed host with a shadow root on Alt+S', async () => {
-    toggle();
-    // enable() awaits loadSettings() before mounting.
-    await new Promise((r) => setTimeout(r, 30));
-    const h = host();
-    expect(h).not.toBeNull();
-    expect(h!.style.position).toBe('fixed');
-    expect(h!.style.zIndex).toBe('2147483646');
-    expect(h!.shadowRoot).not.toBeNull();
+  it('mounts a fixed host with a shadow root and the panel', async () => {
+    const { win } = await makeEnv();
+    await waitFor(() => host(win) !== null);
+    const h = host(win)!;
+    expect(h.style.position).toBe('fixed');
+    expect(h.style.zIndex).toBe('2147483646');
+    expect(h.shadowRoot).not.toBeNull();
+    expect(h.shadowRoot!.querySelector('.panel')).not.toBeNull();
   });
 
-  it('renders the scope panel inside the shadow root', async () => {
-    const h = host();
-    await new Promise((r) => setTimeout(r, 60));
-    const root = h?.shadowRoot;
-    expect(root?.querySelector('.panel')).not.toBeNull();
-    expect(root?.querySelector('.grid')).not.toBeNull();
-    // Default layout is the 2x2 grid.
-    expect(root?.querySelectorAll('.cell').length).toBe(4);
+  it('renders four panels in the default 2x2 layout', async () => {
+    const { win } = await makeEnv();
+    await waitFor(() => host(win)?.shadowRoot?.querySelectorAll('.cell').length === 4);
+    expect(host(win)!.shadowRoot!.querySelectorAll('.cell').length).toBe(4);
   });
 
-  it('exposes the range and units controls', () => {
-    const root = host()?.shadowRoot;
-    expect(root?.getElementById('units')).not.toBeNull();
-    expect(root?.getElementById('range')).not.toBeNull();
-    expect(root?.getElementById('layout')).not.toBeNull();
+  it('exposes the units, range and layout controls', async () => {
+    const { win } = await makeEnv();
+    await waitFor(() => host(win) !== null);
+    const root = host(win)!.shadowRoot!;
+    expect(root.getElementById('units')).not.toBeNull();
+    expect(root.getElementById('range')).not.toBeNull();
+    expect(root.getElementById('layout')).not.toBeNull();
   });
 
-  it('persists visible=true once open', async () => {
-    const store = (win as unknown as { __store: Record<string, unknown> }).__store;
-    const state = store['video-scopes:state'] as { visible?: boolean } | undefined;
-    expect(state?.visible).toBe(true);
+  it('closes on Alt+S and persists visible=false', async () => {
+    const { win, store } = await makeEnv();
+    await waitFor(() => host(win) !== null);
+    win.dispatchEvent(new win.KeyboardEvent('keydown', { altKey: true, code: 'KeyS' }));
+    await waitFor(() => host(win) === null);
+    expect(host(win)).toBeNull();
+    const saved = store['video-scopes:state'] as { visible?: boolean } | undefined;
+    expect(saved?.visible).toBe(false);
   });
 
-  it('unmounts on a second Alt+S and persists visible=false', async () => {
-    toggle();
-    await new Promise((r) => setTimeout(r, 60));
-    expect(host()).toBeNull();
-    const store = (win as unknown as { __store: Record<string, unknown> }).__store;
-    const state = store['video-scopes:state'] as { visible?: boolean } | undefined;
-    expect(state?.visible).toBe(false);
+  it('reopens on a second Alt+S', async () => {
+    const { win } = await makeEnv();
+    await waitFor(() => host(win) !== null);
+    const press = (): void =>
+      win.dispatchEvent(new win.KeyboardEvent('keydown', { altKey: true, code: 'KeyS' }));
+    press();
+    await waitFor(() => host(win) === null);
+    press();
+    await waitFor(() => host(win) !== null);
+    expect(host(win)).not.toBeNull();
   });
 
   it('ignores a plain S keypress', async () => {
+    const { win } = await makeEnv();
+    await waitFor(() => host(win) !== null);
+    const before = host(win);
     win.dispatchEvent(new win.KeyboardEvent('keydown', { code: 'KeyS' }));
-    await new Promise((r) => setTimeout(r, 30));
-    expect(host()).toBeNull();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(host(win)).toBe(before);
   });
 
-  it('responds to the toggle-scopes runtime message', async () => {
-    const listeners = (win as unknown as { __listeners: Array<(m: unknown) => void> }).__listeners;
+  it('responds to the toggle-scopes message used by the toolbar button', async () => {
+    const { win, listeners } = await makeEnv();
+    await waitFor(() => host(win) !== null);
     for (const fn of listeners) fn({ type: 'toggle-scopes' });
-    await new Promise((r) => setTimeout(r, 60));
-    expect(host()).not.toBeNull();
+    await waitFor(() => host(win) === null);
+    expect(host(win)).toBeNull();
     for (const fn of listeners) fn({ type: 'toggle-scopes' });
-    await new Promise((r) => setTimeout(r, 60));
-    expect(host()).toBeNull();
+    await waitFor(() => host(win) !== null);
+    expect(host(win)).not.toBeNull();
   });
 });

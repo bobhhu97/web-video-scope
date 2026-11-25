@@ -99,16 +99,37 @@ try {
   const contentJs = readFileSync(resolve(DIST, 'content.js'), 'utf8');
   await page.evaluate(contentJs);
 
-  // Toggle via the extension's own keyboard shortcut.
-  await page.keyboard.down('Alt');
-  await page.keyboard.press('KeyS');
-  await page.keyboard.up('Alt');
-
+  // The panel now opens by itself on a first run; pressing Alt+S would close it.
+  // Wait for the automatic mount, then confirm the shortcut can close and
+  // reopen it (exercising both directions of the toggle).
   await page.waitForFunction(
     () => document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.grid') !== null,
-    { timeout: 10000 },
+    { timeout: 15000 },
   );
-  check('HUD mounts in a shadow root on Alt+S', true);
+  check('HUD mounts automatically on load', true);
+
+  const pressAltS = async () => {
+    await page.keyboard.down('Alt');
+    await page.keyboard.press('KeyS');
+    await page.keyboard.up('Alt');
+  };
+
+  await pressAltS();
+  const closed = await page
+    .waitForFunction(() => document.getElementById('video-scopes-host') === null, { timeout: 8000 })
+    .then(() => true)
+    .catch(() => false);
+  check('Alt+S closes the panel', closed);
+
+  await pressAltS();
+  const reopened = await page
+    .waitForFunction(
+      () => document.getElementById('video-scopes-host')?.shadowRoot?.querySelector('.panel') !== null,
+      { timeout: 8000 },
+    )
+    .then(() => true)
+    .catch(() => false);
+  check('Alt+S reopens the panel', reopened);
 
   // Wait for the scopes to actually render something.
   // Wait for the pipeline to be genuinely running: a steady frame rate AND

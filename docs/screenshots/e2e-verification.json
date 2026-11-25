@@ -1,12 +1,20 @@
 {
-  "when": "2026-11-25T06:24:27.071Z",
+  "when": "2026-11-25T06:32:34.709Z",
   "results": [
     {
       "name": "host page has a playing video with metadata",
       "ok": true
     },
     {
-      "name": "HUD mounts in a shadow root on Alt+S",
+      "name": "HUD mounts automatically on load",
+      "ok": true
+    },
+    {
+      "name": "Alt+S closes the panel",
+      "ok": true
+    },
+    {
+      "name": "Alt+S reopens the panel",
       "ok": true
     },
     {
@@ -27,7 +35,7 @@
     {
       "name": "perf badge shows a live frame rate",
       "ok": true,
-      "detail": "1 fps · 10.6 ms · 0copy · auto:1"
+      "detail": "1 fps · 5.4 ms · 0copy · auto:1"
     },
     {
       "name": "host is position:fixed with the documented z-index",
@@ -47,12 +55,12 @@
     {
       "name": "zero-copy upload path is in use (no per-frame pixel copy)",
       "ok": true,
-      "detail": "1 fps · 10.6 ms · 0copy · auto:1"
+      "detail": "1 fps · 5.4 ms · 0copy · auto:1"
     },
     {
       "name": "analysis reaches a steady frame rate near the source ceiling",
       "ok": true,
-      "detail": "33 fps · 1.4 ms · 0copy · auto:0"
+      "detail": "33 fps · 0.7 ms · 0copy · auto:0"
     },
     {
       "name": "state persists visible=true to chrome.storage",
@@ -76,7 +84,7 @@
     {
       "name": "raw mode keeps a usable frame rate",
       "ok": true,
-      "detail": "22 fps · 2.6 ms · raw · auto:1"
+      "detail": "33 fps · 1.9 ms · raw · auto:0"
     },
     {
       "name": "Alt + pointer reports a pixel reading",
