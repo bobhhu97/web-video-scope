@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Colour bars host page</title>
+    <style>
+      body { margin: 0; background: #0b0f12; color: #b9c6d0; font: 12px ui-monospace, monospace; }
+      canvas { display: block; }
+      video { width: 640px; display: block; background: #000; }
+    </style>
+  </head>
+  <body>
+    <canvas id="pattern" width="1280" height="720"></canvas>
+    <video id="video" muted playsinline loop autoplay></video>
+    <script>
+      // Saturated bars plus neutrals: the only pattern that puts points in
+      // distinct places on a CIE plot or a vectorscope. A grey ramp collapses to
+      // a single neutral point by definition and cannot test either scope.
+      const p = document.getElementById('pattern');
+      const ctx = p.getContext('2d');
+      const bars = ['#ffffff', '#ffff00', '#00ffff', '#00ff00', '#ff00ff', '#ff0000',
+                    '#0000ff', '#000000', '#7f7f7f', '#c0c0c0'];
+      bars.forEach((c, i) => {
+        ctx.fillStyle = c;
+        ctx.fillRect(Math.round((i * p.width) / bars.length), 0, Math.ceil(p.width / bars.length), p.height);
+      });
+      const v = document.getElementById('video');
+      window.__videoReady = false;
+      v.addEventListener('loadedmetadata', () => { window.__videoReady = true; });
+      v.srcObject = p.captureStream(30);
+      v.play().catch(() => {});
+      if (v.readyState >= 1) window.__videoReady = true;
+    </script>
+  </body>
+</html>

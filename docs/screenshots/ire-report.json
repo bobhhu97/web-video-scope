@@ -4,9 +4,9 @@
     "encode": "255 * x",
     "expectMax": 100,
     "expectMin": 0,
-    "status": "axis:limited · webcodecs",
-    "maxIre": 100.5,
-    "minIre": 0.5,
+    "status": "axis:limited",
+    "maxIre": 100.1,
+    "minIre": 0.4,
     "ok": true
   }
 ]

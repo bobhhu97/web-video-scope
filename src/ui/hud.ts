@@ -28,6 +28,26 @@ const MODE_LABELS: Record<ScopeMode, string> = {
   cie: 'CIE',
 };
 
+/**
+ * CSS class for a layout.
+ *
+ * The container is itself `.grid`, so a four-up layout also called `.grid`
+ * produced the selector `.grid.grid` — which matches *any* element with class
+ * "grid", including the container in single view. That rule came after
+ * `.grid.single` and, at equal specificity, won: every layout rendered as 2x2.
+ */
+function layoutClass(layout: Layout): string {
+  return layout === 'grid' ? 'quad' : layout;
+}
+
+/** Panel counts offered directly in the toolbar. */
+const LAYOUTS: { layout: Layout; label: string; title: string }[] = [
+  { layout: 'single', label: '1', title: 'One scope' },
+  { layout: 'pair', label: '2', title: 'Two scopes' },
+  { layout: 'triple', label: '3', title: 'Three scopes' },
+  { layout: 'grid', label: '4', title: 'Four scopes' },
+];
+
 const STYLE = `
   :host { all: initial; }
 
@@ -75,14 +95,16 @@ const STYLE = `
   }
 
   /* ---- scope picker ---------------------------------------------------- */
-  nav.modes {
-    display: flex; gap: 3px; flex: 0 0 auto;
+  nav.bar {
+    display: flex; gap: 6px; align-items: center; flex: 0 0 auto;
     padding: 4px 6px; background: #0f1418;
     border-bottom: 1px solid #ffffff10;
     overflow-x: auto; scrollbar-width: none;
   }
-  nav.modes::-webkit-scrollbar { display: none; }
-  nav.modes button { white-space: nowrap; }
+  nav.bar::-webkit-scrollbar { display: none; }
+  nav.bar .grp { display: flex; gap: 2px; }
+  nav.bar .sep { width: 1px; height: 16px; background: #ffffff1a; flex: 0 0 auto; }
+  nav.bar button { white-space: nowrap; min-width: 26px; }
 
   /* ---- scope area ------------------------------------------------------ */
   .grid {
@@ -92,7 +114,8 @@ const STYLE = `
   }
   /* Height is the scarce resource: the scopes are wide and short. */
   .grid.single { grid-template-columns: 1fr; grid-template-rows: 1fr; }
-  .grid.grid { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+  .grid.pair { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
+  .grid.quad { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
   .grid.triple { grid-template-columns: 1fr; grid-template-rows: repeat(3, 1fr); }
 
   .cell {
@@ -145,6 +168,8 @@ const STYLE = `
 export class Hud {
   private host: HTMLDivElement | null = null;
   private root: ShadowRoot | null = null;
+  /** Document this panel was built in; canvas contexts are bound to it. */
+  private doc: Document | null = null;
   private canvases = new Map<ScopeMode, PanelTargets>();
   private state: HudState;
   private readonly handlers: HudHandlers;
@@ -162,24 +187,34 @@ export class Hud {
     return this.host;
   }
 
-  mount(): void {
+  /**
+   * Build the panel inside `doc`.
+   *
+   * The document is a parameter because a Document PiP window has its own. Every
+   * element, including the canvases, must be created by that document: moving a
+   * canvas between documents invalidates its WebGPU context.
+   */
+  mount(doc: Document = document, opts: { fill?: boolean } = {}): void {
     if (this.host) return;
-    const host = document.createElement('div');
+    const host = doc.createElement('div');
     host.id = HOST_ID;
     // `all: initial` MUST come first: it resets every property, so writing it
     // after `position: fixed` silently drops the host back into normal flow.
-    host.style.cssText =
-      'all:initial;position:fixed;top:16px;right:16px;left:auto;' +
-      'width:720px;height:540px;min-width:320px;min-height:260px;' +
-      'z-index:2147483646;resize:both;overflow:hidden;';
+    host.style.cssText = opts.fill
+      ? 'all:initial;position:absolute;inset:0;width:100%;height:100%;' +
+        'min-width:320px;min-height:240px;z-index:1;overflow:hidden;'
+      : 'all:initial;position:fixed;top:16px;right:16px;left:auto;' +
+        'width:720px;height:540px;min-width:320px;min-height:260px;' +
+        'z-index:2147483646;resize:both;overflow:hidden;';
 
     const root = host.attachShadow({ mode: 'open' });
     root.innerHTML = this.template();
 
     this.host = host;
     this.root = root;
-    this.applyPosition();
-    document.documentElement.appendChild(host);
+    this.doc = doc;
+    if (!opts.fill) this.applyPosition();
+    (doc.documentElement ?? doc.body).appendChild(host);
 
     this.buildCells();
     this.wire();
@@ -217,7 +252,7 @@ export class Hud {
     if (!this.root) return;
     const grid = this.root.querySelector('.grid') as HTMLElement | null;
     if (!grid) return;
-    grid.className = `grid ${layout}`;
+    grid.className = `grid ${layoutClass(layout)}`;
     // Use the layout the caller just asserted, not a locally cached copy that a
     // racing setState() may already have overwritten.
     this.buildCells(layout);
@@ -333,18 +368,23 @@ export class Hud {
         <div class="notice" id="notice" hidden></div>
         <div class="notice" id="probe" hidden></div>
 
-        <nav class="modes" id="modes"></nav>
+        <nav class="bar">
+          <span class="grp" id="layouts"></span>
+          <span class="sep"></span>
+          <span class="grp" id="modes"></span>
+        </nav>
 
-        <div class="grid ${this.state.layout}"></div>
+        <div class="grid ${layoutClass(this.state.layout)}"></div>
 
         <details class="options" open>
           <summary>Options</summary>
           <div class="opts">
             <label>layout
               <select id="layout">
-                <option value="grid">2×2</option>
-                <option value="triple">1×3</option>
-                <option value="single">Single</option>
+                <option value="single">1 · single</option>
+                <option value="pair">2 · side by side</option>
+                <option value="triple">3 · stacked</option>
+                <option value="grid">4 · grid</option>
               </select>
             </label>
             <label>units
@@ -413,16 +453,39 @@ export class Hud {
   }
 
   private syncModeButtons(): void {
-    const nav = this.root?.getElementById('modes');
-    if (!nav) return;
-    for (const btn of Array.from(nav.querySelectorAll<HTMLButtonElement>('button'))) {
+    const root = this.root;
+    if (!root) return;
+    for (const btn of Array.from(root.querySelectorAll<HTMLButtonElement>('#modes button'))) {
       btn.setAttribute('aria-pressed', btn.dataset.mode === this.state.mode ? 'true' : 'false');
+    }
+    for (const btn of Array.from(root.querySelectorAll<HTMLButtonElement>('#layouts button'))) {
+      btn.setAttribute('aria-pressed', btn.dataset.layout === this.state.layout ? 'true' : 'false');
     }
   }
 
   private wire(): void {
     const root = this.root;
     if (!root) return;
+
+    // Panel-count buttons. The <select> in Options does the same thing, but it
+    // is collapsed by default and too slow to reach mid-grade, so the count is
+    // also one click away in the toolbar.
+    const layoutNav = root.getElementById('layouts')!;
+    layoutNav.innerHTML = LAYOUTS.map(
+      (l) =>
+        `<button data-layout="${l.layout}" type="button" title="${l.title}" aria-pressed="false">${l.label}</button>`,
+    ).join('');
+    for (const btn of Array.from(layoutNav.querySelectorAll<HTMLButtonElement>('button'))) {
+      btn.addEventListener('click', () => {
+        const layout = btn.dataset.layout as Layout;
+        this.state = { ...this.state, layout };
+        this.handlers.onLayoutChange(layout);
+        this.syncModeButtons();
+        // Keep the Options dropdown in step: two controls for one value that can
+        // disagree is a bug report waiting to happen.
+        this.syncInputs();
+      });
+    }
 
     // Scope picker. Choosing a scope switches to single view: in a multi-panel
     // layout "use this scope" has no other sensible meaning, and it is the

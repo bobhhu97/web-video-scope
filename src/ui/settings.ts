@@ -3,7 +3,11 @@ import type { PrimariesId } from '../core/color/primaries';
 import type { RangeMode } from '../core/range-detector';
 import type { Unit } from '../core/scale/units';
 
-export type Layout = 'single' | 'grid' | 'triple';
+/**
+ * Panel arrangements. `single` shows one scope at full size, `pair` two,
+ * `triple` three stacked, `grid` the four-up view.
+ */
+export type Layout = 'single' | 'pair' | 'triple' | 'grid';
 
 export interface HudState {
   visible: boolean;
@@ -68,13 +72,22 @@ export async function saveSettings(s: HudState): Promise<void> {
 }
 
 /** Which panels a layout shows, in grid order. */
-export function panelsForLayout(layout: Layout, single: ScopeMode): ScopeMode[] {
+/**
+ * Which scopes a layout shows.
+ *
+ * `single` and `pair` honour the user's picked scope; the wider layouts use a
+ * fixed, useful set so that switching to four-up does not depend on what was
+ * selected for the single slot.
+ */
+export function panelsForLayout(layout: Layout, picked: ScopeMode): ScopeMode[] {
   switch (layout) {
     case 'grid':
       return ['waveform-rgb', 'waveform-parade', 'vectorscope', 'cie'];
     case 'triple':
       return ['waveform-luma', 'waveform-parade', 'vectorscope'];
+    case 'pair':
+      return [picked, picked === 'vectorscope' ? 'waveform-parade' : 'vectorscope'];
     case 'single':
-      return [single];
+      return [picked];
   }
 }

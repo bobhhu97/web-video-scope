@@ -3,7 +3,7 @@ import { FrameLoop } from './frame-loop';
 import { followFullscreen } from './fullscreen';
 import { readVideoColorSpace, applyRangeMode } from './color-space';
 import { ScopeController } from './scope-controller';
-import { Hud } from '../ui/hud';
+import { Hud, type HudHandlers } from '../ui/hud';
 import { DEFAULT_STATE, loadSettings, saveSettings, type HudState, type Layout } from '../ui/settings';
 import {
   DEFAULT_SCOPE_OPTIONS,
@@ -24,7 +24,7 @@ import { GpuTimer } from '../core/gpu-timer';
 import { getDevice } from '../gpu/device';
 import type { AnalysisPreset } from '../gpu/downscale';
 import { Probe, formatSample } from '../ui/probe';
-import { openFloatingWindow, returnToPage, pipSupported, type PiPHost } from '../ui/pip';
+import { openFloatingWindow, pipSupported, type FloatingWindow } from '../ui/pip';
 import { videoReadability, readabilityNotice, type Readability } from './readability';
 import { keepAttached, type Guardian } from './keep-attached';
 
@@ -64,7 +64,9 @@ let unfollowFullscreen: (() => void) | null = null;
 let guardian: Guardian | null = null;
 let reattachCount = 0;
 let lastDisableReason = 'none';
-let floating: PiPHost | null = null;
+let floating: FloatingWindow | null = null;
+/** The HUD living in the floating window, if any. */
+let floatingHud: Hud | null = null;
 let probe: Probe | null = null;
 let probedVideo: HTMLVideoElement | null = null;
 let readability: Readability = { kind: 'unknown' };
@@ -135,8 +137,8 @@ function applyTier(tier: QualityTier): void {
 }
 
 function refreshHud(): void {
-  hud?.setState(state);
-  hud?.setColorInfo(colorInfo);
+  activeHud()?.setState(state);
+  activeHud()?.setColorInfo(colorInfo);
   controller?.setOptionsFor(optionsForMode);
 }
 
@@ -154,7 +156,7 @@ function onDiagnosis(hist: Uint32Array, total: number): void {
   // handed to the renderer. Showing the detector's verdict instead let the badge
   // claim "axis:limited" while the shader plotted on a full-range axis, which is
   // how a legal white reading reached 119 IRE with no explanation.
-  hud?.setDiagnosis({ ...diagnosis, effective: effectiveRange.limited ? 'limited' : 'full' });
+  activeHud()?.setDiagnosis({ ...diagnosis, effective: effectiveRange.limited ? 'limited' : 'full' });
 
   if (changed) controller?.setOptionsFor(optionsForMode);
 }
@@ -178,9 +180,9 @@ async function onFrameSubmitted(): Promise<void> {
   const now = performance.now();
   if (now - lastPerfAt > 500) {
     const fps = (frameCount * 1000) / (now - lastPerfAt);
-    hud?.setPerf(fps, timer.lastMs, currentTier(), controller?.uploadPath);
+    activeHud()?.setPerf(fps, timer.lastMs, currentTier(), controller?.uploadPath);
     const dims = controller?.analysisDims;
-    if (dims) hud?.setNotice(null);
+    if (dims) activeHud()?.setNotice(null);
     frameCount = 0;
     lastPerfAt = now;
   }
@@ -203,7 +205,7 @@ function onFrame(): void {
       info.transfer !== colorInfo.transfer
     ) {
       colorInfo = info;
-      hud?.setColorInfo(colorInfo);
+      activeHud()?.setColorInfo(colorInfo);
       controller.setOptionsFor(optionsForMode);
     }
   }
@@ -221,7 +223,7 @@ function onFrame(): void {
 function buildController(): void {
   controller?.destroy();
   controller = new ScopeController(
-    hud?.panelCanvases() ?? [],
+    activeHud()?.panelCanvases() ?? [],
     optionsForMode,
     { onDiagnosis, onFrameSubmitted },
     () => state.gamuts,
@@ -238,7 +240,7 @@ function buildController(): void {
       return state.rangeMode;
     },
   };
-  controller.onRawError = (msg) => hud?.setNotice(`Raw mode unavailable: ${msg}`);
+  controller.onRawError = (msg) => activeHud()?.setNotice(`Raw mode unavailable: ${msg}`);
 }
 
 async function enable(): Promise<void> {
@@ -277,8 +279,9 @@ async function enable(): Promise<void> {
 }
 
 /** Handlers for a freshly created HUD. Split out so mount can precede I/O. */
-function buildHud(): Hud {
-  return new Hud(state, {
+/** Handlers shared by the in-page HUD and the one in the floating window. */
+function buildHandlers(): HudHandlers {
+  return {
     onStateChange(patch) {
       const signalChanged = patch.signalMode !== undefined && patch.signalMode !== state.signalMode;
       const modeChanged = patch.mode !== undefined && patch.mode !== state.mode;
@@ -289,7 +292,7 @@ function buildHud(): Hud {
         // Highlight only. Cell rebuilds belong to onLayoutChange, which the
         // caller invokes explicitly; rebuilding here raced with it and the
         // loser overwrote the grid with the old layout.
-        hud?.setSingleMode(state.mode);
+        activeHud()?.setSingleMode(state.mode);
       }
       refreshHud();
     },
@@ -299,8 +302,8 @@ function buildHud(): Hud {
       // One pass: push state, rebuild the cells, then hand the new canvases to
       // the controller. Calling setState again afterwards re-synced inputs but
       // also re-ran the mode highlight, which could re-assert the old grid.
-      hud?.relayout(layout);
-      controller?.setTargets(hud?.panelCanvases() ?? []);
+      activeHud()?.relayout(layout);
+      controller?.setTargets(activeHud()?.panelCanvases() ?? []);
       controller?.setOptionsFor(optionsForMode);
       void saveSettings(state);
     },
@@ -314,10 +317,20 @@ function buildHud(): Hud {
       const locked = state.lockedTier === null;
       state = { ...state, lockedTier: locked ? currentTier() : null };
       void saveSettings(state);
-      hud?.setState(state);
-      hud?.setPerf(0, timer.lastMs, currentTier());
+      activeHud()?.setState(state);
+      activeHud()?.setPerf(0, timer.lastMs, currentTier());
     },
-  });
+  };
+}
+
+/** The panel shown in the page. */
+function buildHud(): Hud {
+  return new Hud(state, buildHandlers());
+}
+
+/** The panel shown in the floating window, when one is open. */
+function activeHud(): Hud | null {
+  return floatingHud ?? hud;
 }
 
 /**
@@ -326,7 +339,7 @@ function buildHud(): Hud {
  * panel that can explain itself.
  */
 function finishEnable(): void {
-  const mounted = hud?.hostElement;
+  const mounted = activeHud()?.hostElement;
   if (!mounted) {
     // enable() was torn down between mount and this call (a fast close, or a
     // second enable racing the first). Nothing to wire up.
@@ -352,7 +365,7 @@ function finishEnable(): void {
     stampTitle('controller-ready');
 
     probe = new Probe(
-    (sample) => hud?.setProbe(formatSample(sample, state.units, effectiveRange)),
+    (sample) => activeHud()?.setProbe(formatSample(sample, state.units, effectiveRange)),
     () => ({ matrix: colorInfo.matrix ?? 'bt709', range: effectiveRange }),
   );
 
@@ -363,7 +376,7 @@ function finishEnable(): void {
     probedVideo = video;
     if (!video) {
       readability = { kind: 'unknown' };
-      hud?.setNotice('No video found on this page.');
+      activeHud()?.setNotice('No video found on this page.');
       stampTitle('no-video');
       return;
     }
@@ -371,7 +384,7 @@ function finishEnable(): void {
     // Tell the user *why* a scope would be empty, instead of showing a blank
     // panel that looks broken.
     readability = videoReadability(video);
-    hud?.setNotice(readabilityNotice(readability, true));
+    activeHud()?.setNotice(readabilityNotice(readability, true));
     if (readability.kind === 'readable') probe?.enable(video);
     loop = new FrameLoop(video, onFrame);
     loop.setTargetFps(TIER_DESCRIPTION[currentTier()].fps);
@@ -399,11 +412,11 @@ function finishEnable(): void {
       stampTitle('trace', history.slice(-6).join(' > '));
       if (history.length >= 10) clearInterval(trace);
     }, 1000);
-    if (!detector.video) hud?.setNotice('No video found on this page.');
+    if (!detector.video) activeHud()?.setNotice('No video found on this page.');
   } catch (e) {
     // The panel is already on screen, so report here instead of throwing.
     const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-    hud?.setNotice(`Scopes failed to start: ${msg}`);
+    activeHud()?.setNotice(`Scopes failed to start: ${msg}`);
     stampTitle('scopes-failed');
     console.error('[video-scopes] finishEnable failed:', msg);
   }
@@ -439,7 +452,7 @@ async function disable(): Promise<void> {
   if (probedVideo && probe) probe.disable(probedVideo);
   probe = null;
   probedVideo = null;
-  hud?.unmount();
+  activeHud()?.unmount();
   hud = null;
   stampTitle('closed');
   rangeDetector.reset();
@@ -547,49 +560,64 @@ function ensureVisible(): void {
  * Move the panel into an always-on-top window. Falls back to keeping it in the
  * page (and says so) when the API is unavailable.
  */
+/**
+ * Move the panel into an always-on-top window.
+ *
+ * The HUD is rebuilt inside that window rather than moved into it. A WebGPU
+ * canvas context belongs to the document that configured it, so adopting a
+ * canvas into a PiP document kills the context: the panel would appear with a
+ * drawn graticule and no trace. Only a HUD created by that document works.
+ */
 async function detachToFloatingWindow(): Promise<void> {
-  const host = document.getElementById(HOST_ID);
-  if (!host) return;
   if (floating?.isOpen()) {
     floating.window.focus();
     return;
   }
   if (!pipSupported()) {
-    hud?.setNotice('Floating window needs Chrome 116+. Panel shown in page.');
+    activeHud()?.setNotice('Floating window needs Chrome 116+. Panel shown in page.');
     guardian?.reattach();
-    host.style.zIndex = '2147483646';
     return;
   }
-  try {
-    // Fullscreen tracking would drag the host back into the page; stop it while
-    // the panel lives outside.
-    unfollowFullscreen?.();
-    unfollowFullscreen = null;
-    guardian?.stop();
-    guardian = null;
 
-    floating = await openFloatingWindow(host, {
+  try {
+    floating = await openFloatingWindow({
       width: Math.min(900, Math.round(window.screen.availWidth * 0.5)),
-      height: Math.min(640, Math.round(window.screen.availHeight * 0.7)),
+      height: Math.min(680, Math.round(window.screen.availHeight * 0.72)),
       onClosed: () => {
         floating = null;
-        // Put it back where it can be found again.
-        const h = document.getElementById(HOST_ID);
-        if (h && enabled) {
-          returnToPage(h, document.documentElement);
-          guardian = keepAttached(h, () => document.documentElement, (n) => {
-            reattachCount = n;
-          });
-          stampGeometry('returned');
-        }
+        floatingHud?.unmount();
+        floatingHud = null;
+        controller?.setTargets(activeHud()?.panelCanvases() ?? []);
+        stampTitle('returned');
       },
     });
+
+    // Tear down the in-page panel first: leaving it mounted put two panels in the
+    // document at once (the page's and the window's), which looked like one panel
+    // nested inside another and doubled the GPU work.
+    guardian?.stop();
+    guardian = null;
+    hud?.unmount();
+    hud = null;
+
+    // Build a fresh HUD inside the window's document. Its canvases are created
+    // there, so their GPU contexts are valid.
+    floatingHud = new Hud(
+      { ...state, hostPosition: { left: 0, top: 0, right: 0 } },
+      buildHandlers(),
+    );
+    floatingHud.mount(floating.document, { fill: true });
+
+    if (!controller) buildController();
+    controller?.setTargets(floatingHud.panelCanvases());
+    controller?.setOptionsFor(optionsForMode);
+    controller?.resize();
+
     stampTitle('floating');
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    hud?.setNotice(`Floating window failed: ${msg}`);
+    activeHud()?.setNotice(`Floating window failed: ${msg}`);
     guardian?.reattach();
-    host.style.zIndex = '2147483646';
   }
 }
 
@@ -650,7 +678,7 @@ void (async () => {
 
 // Keep the panel reachable when the page tears down the DOM it lived in.
 document.addEventListener('fullscreenchange', () => {
-  if (!hud?.mounted) return;
+  if (!activeHud()?.mounted) return;
   const host = document.getElementById(HOST_ID);
   if (!host) return;
   const fs = document.fullscreenElement;

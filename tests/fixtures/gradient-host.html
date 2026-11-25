@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gradient host page</title>
+    <style>
+      body { margin: 0; background: #0b0f12; color: #b9c6d0; font: 12px ui-monospace, monospace; }
+      canvas { display: block; }
+      video { width: 640px; display: block; background: #000; }
+    </style>
+  </head>
+  <body>
+    <canvas id="pattern" width="1280" height="720"></canvas>
+    <video id="video" muted playsinline loop autoplay></video>
+    <script>
+      // A two-dimensional Hue x Saturation sweep. Unlike colour bars this fills a
+      // large area of colour space, which is what real footage looks like and what
+      // a CIE plot is for. A discrete pattern can only prove the mapping; this
+      // proves the plot fills in like a scope rather than a handful of dots.
+      const p = document.getElementById('pattern');
+      const ctx = p.getContext('2d');
+      const img = ctx.createImageData(p.width, p.height);
+      for (let y = 0; y < p.height; y++) {
+        const s = y / (p.height - 1);
+        const l = 0.5;
+        for (let x = 0; x < p.width; x++) {
+          const h = (x / p.width) * 360;
+          // HSL -> RGB at fixed lightness, so the sweep stays inside sRGB.
+          const c = (1 - Math.abs(2 * l - 1)) * s;
+          const hp = h / 60;
+          const X = c * (1 - Math.abs((hp % 2) - 1));
+          let r = 0, g = 0, b = 0;
+          if (hp < 1) { r = c; g = X; }
+          else if (hp < 2) { r = X; g = c; }
+          else if (hp < 3) { g = c; b = X; }
+          else if (hp < 4) { g = X; b = c; }
+          else if (hp < 5) { r = X; b = c; }
+          else { r = c; b = X; }
+          const m = l - c / 2;
+          const i = (y * p.width + x) * 4;
+          img.data[i] = Math.round((r + m) * 255);
+          img.data[i + 1] = Math.round((g + m) * 255);
+          img.data[i + 2] = Math.round((b + m) * 255);
+          img.data[i + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+
+      const v = document.getElementById('video');
+      window.__videoReady = false;
+      v.addEventListener('loadedmetadata', () => { window.__videoReady = true; });
+      v.srcObject = p.captureStream(30);
+      v.play().catch(() => {});
+      if (v.readyState >= 1) window.__videoReady = true;
+    </script>
+  </body>
+</html>

@@ -89,13 +89,13 @@ try {
     const panel = q('.panel');
     const grid = q('.grid');
     const opts = q('details.options');
-    const nav = q('nav.modes');
+    const nav = q('#modes');
     return {
       dpr: window.devicePixelRatio,
       panelH: Math.round(rect(panel).height),
       gridH: Math.round(rect(grid).height),
       optsH: Math.round(rect(opts).height),
-      navButtons: Array.from(root.querySelectorAll('nav.modes button')).map((b) => b.textContent),
+      navButtons: Array.from(root.querySelectorAll('#modes button')).map((b) => b.textContent),
       optsVisible: rect(opts).height > 10 && rect(opts).bottom <= rect(panel).bottom + 1,
       gridGetsMostSpace: rect(grid).height > rect(opts).height,
       layoutValue: root.getElementById('layout')?.value,
@@ -118,7 +118,7 @@ try {
       window.__gridHistory.push(grid.className + ' #' + grid.querySelectorAll('.cell').length);
     }).observe(grid, { attributes: true, childList: true, attributeFilter: ['class'] });
 
-    const btn = Array.from(root.querySelectorAll('nav.modes button'))
+    const btn = Array.from(root.querySelectorAll('#modes button'))
       .find((b) => b.textContent === 'Vector');
     btn.click();
     window.__gridHistory.push('after-click ' + grid.className + ' #' + grid.querySelectorAll('.cell').length);
@@ -139,7 +139,7 @@ try {
   const afterPick = await page.evaluate(() => {
     const root = document.getElementById('video-scopes-host').shadowRoot;
     const cells = Array.from(root.querySelectorAll('.cell'));
-    const navBtn = Array.from(root.querySelectorAll('nav.modes button'))
+    const navBtn = Array.from(root.querySelectorAll('#modes button'))
       .find((b) => b.textContent === 'Vector');
     return {
       navBtnExists: !!navBtn,
@@ -147,7 +147,7 @@ try {
       count: cells.length,
       modes: cells.map((c) => c.dataset.mode),
       layout: root.getElementById('layout')?.value,
-      pressed: Array.from(root.querySelectorAll('nav.modes button'))
+      pressed: Array.from(root.querySelectorAll('#modes button'))
         .filter((b) => b.getAttribute('aria-pressed') === 'true')
         .map((b) => b.textContent),
     };
@@ -161,11 +161,59 @@ try {
   }
   check('the chosen scope is the one shown', afterPick.modes[0] === 'vectorscope', afterPick.modes.join(','));
 
+  // Panel-count buttons, one through four. This is the control the user said was
+  // missing entirely, so measure the resulting cell count, not just the click.
+  const layoutBtnCount = await page.evaluate(
+    () => document.getElementById('video-scopes-host').shadowRoot.querySelectorAll('#layouts button').length,
+  );
+  check('the toolbar has one button per panel count', layoutBtnCount === 4, `${layoutBtnCount} buttons`);
+
+  for (const [label, expected] of [['2', 2], ['3', 3], ['4', 4], ['1', 1]]) {
+    await page.evaluate((l) => {
+      const root = document.getElementById('video-scopes-host').shadowRoot;
+      const btn = Array.from(root.querySelectorAll('#layouts button')).find((b) => b.textContent === l);
+      btn.click();
+    }, label);
+    // New cells need fresh WebGPU contexts, so wait for the count rather than a
+    // fixed delay.
+    await page
+      .waitForFunction(
+        (n) => {
+          const root = document.getElementById('video-scopes-host')?.shadowRoot;
+          if (!root) return false;
+          const cells = root.querySelectorAll('.cell').length;
+          return n === 1 ? cells === 1 : cells === n;
+        },
+        { timeout: 8000 },
+        expected,
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 400));
+    const got = await page.evaluate(() => {
+      const root = document.getElementById('video-scopes-host').shadowRoot;
+      const cells = Array.from(root.querySelectorAll('.cell'));
+      const pressed = Array.from(root.querySelectorAll('#layouts button'))
+        .filter((b) => b.getAttribute('aria-pressed') === 'true')
+        .map((b) => b.textContent);
+      // Every cell must have a non-zero box, or the "grid" is only nominal.
+      const sized = cells.every((c) => {
+        const r = c.getBoundingClientRect();
+        return r.width > 40 && r.height > 30;
+      });
+      return { count: cells.length, pressed, sized, select: root.getElementById('layout')?.value };
+    });
+    check(
+      `the "${label}" button yields ${expected} sized panel(s)`,
+      got.count === expected && got.sized && got.pressed.length === 1 && got.pressed[0] === label,
+      `${got.count} cells, sized=${got.sized}, pressed=${got.pressed.join('|')}, select=${got.select}`,
+    );
+  }
+
   // Measure in single luma view: an RGB overlay's peak is the brightest
   // channel, not luma white, so the IRE arithmetic would be meaningless there.
   await page.evaluate(() => {
     const root = document.getElementById('video-scopes-host').shadowRoot;
-    const btn = Array.from(root.querySelectorAll('nav.modes button')).find((b) => b.textContent === 'Wave');
+    const btn = Array.from(root.querySelectorAll('#modes button')).find((b) => b.textContent === 'Wave');
     btn.click();
   });
   await page.waitForFunction(
@@ -191,12 +239,32 @@ try {
     const plotTop = pad.top;
     const plotH = cssH - pad.top - pad.bottom;
 
-    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-    const bmp = await createImageBitmap(canvas);
-    const oc = new OffscreenCanvas(bmp.width, bmp.height);
-    const ctx = oc.getContext('2d');
-    ctx.drawImage(bmp, 0, 0);
-    const d = ctx.getImageData(0, 0, bmp.width, bmp.height).data;
+    // A WebGPU canvas only holds real pixels once it has been presented, and
+    // createImageBitmap can win that race and read an empty buffer. Poll until
+    // two frames in a row agree and at least one lit pixel exists, rather than
+    // sampling once after two rAFs — sampling once produced intermittent
+    // "the waveform is blank" reports for a scope that was drawing fine.
+    const readFrame = async () => {
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const bmp = await createImageBitmap(canvas);
+      const oc = new OffscreenCanvas(bmp.width, bmp.height);
+      const c = oc.getContext('2d');
+      c.drawImage(bmp, 0, 0);
+      return { bmp, d: c.getImageData(0, 0, bmp.width, bmp.height).data };
+    };
+    let bmp = null;
+    let d = null;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const got = await readFrame();
+      bmp = got.bmp;
+      d = got.d;
+      let lit = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i] + d[i + 1] + d[i + 2] > 60) { lit++; if (lit > 20) break; }
+      }
+      if (lit > 20) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
 
     // Extent of lit pixels, in CSS px.
     let topmost = bmp.height, leftmost = bmp.width, rightmost = -1;
@@ -241,6 +309,25 @@ try {
       leftInsetCss: +(leftmost / dpr).toFixed(1),
       rightGapCss: +((bmp.width - 1 - rightmost) / dpr).toFixed(1),
       peakIre: +ire.toFixed(1),
+      debug: {
+        canvasW: canvas.width, canvasH: canvas.height, cssW, cssH, dpr,
+        grids: root.querySelectorAll('.grid').length,
+        gridClass: root.querySelector('.grid')?.className,
+        gridRect: ((g) => ({ w: Math.round(g.width), h: Math.round(g.height) }))(
+          root.querySelector('.grid').getBoundingClientRect()),
+        hostRect: ((g) => ({ w: Math.round(g.width), h: Math.round(g.height) }))(
+          document.getElementById('video-scopes-host').getBoundingClientRect()),
+        panelRect: ((g) => ({ w: Math.round(g.width), h: Math.round(g.height) }))(
+          root.querySelector('.panel').getBoundingClientRect()),
+        gridStyle: ((g) => {
+          const cs = getComputedStyle(g);
+          return { cols: cs.gridTemplateColumns, rows: cs.gridTemplateRows, cls: g.className };
+        })(root.querySelector('.grid')),
+        cells: Array.from(root.querySelectorAll('.cell')).map((c) => {
+          const r = c.getBoundingClientRect();
+          return `${c.dataset.mode}:${Math.round(r.width)}x${Math.round(r.height)}`;
+        }),
+      }, 
       labelPixels,
       badge: root.getElementById('status')?.textContent ?? '',
     };

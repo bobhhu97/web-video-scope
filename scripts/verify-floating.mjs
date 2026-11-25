@@ -95,15 +95,30 @@ try {
   if (pipPage) {
     const inside = await pipPage.evaluate(() => {
       const h = document.getElementById('video-scopes-host');
+      const cell = h?.shadowRoot?.querySelector('.cell');
+      const canvas = cell?.querySelector('canvas.gpu');
+      // The decisive check: the canvas must have been created by THIS document.
+      // A canvas adopted from the page keeps working for reading but its WebGPU
+      // context is dead, which is the bug that made the window look empty.
+      const ownedByThisDocument = !!canvas && canvas.ownerDocument === document;
+      const hasContext = !!canvas && !!canvas.getContext;
       return {
         hasHost: !!h,
         hasPanel: !!h?.shadowRoot?.querySelector('.panel'),
         cells: h?.shadowRoot?.querySelectorAll('.cell').length ?? 0,
         size: h ? `${Math.round(h.getBoundingClientRect().width)}x${Math.round(h.getBoundingClientRect().height)}` : null,
+        ownedByThisDocument,
+        hasContext,
+        canvasSize: canvas ? `${canvas.width}x${canvas.height}` : null,
       };
     });
     check('the HUD is inside the separate window', inside.hasHost && inside.hasPanel, JSON.stringify(inside));
-    check('all four scope panels travelled with it', inside.cells === 4, `${inside.cells} cells`);
+    check('all four scope panels are present in the window', inside.cells === 4, `${inside.cells} cells`);
+    check(
+      'canvases were created by the window document (GPU context usable)',
+      inside.ownedByThisDocument,
+      `ownerDocument matches: ${inside.ownedByThisDocument}, canvas ${inside.canvasSize}`,
+    );
 
     // Let the pipeline run inside the new window.
     let lit = 0;

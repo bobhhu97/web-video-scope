@@ -1,5 +1,6 @@
 import { LUMA, SKIN_TONE_ANGLE_DEG, chromaTargets } from '../core/color/matrices';
 import { CIE1931_LOCUS, gamutTriangle } from '../core/color/locus';
+import { smoothOpenSpline } from '../core/color/spline';
 import { linearToSrgb, xyToLinearSrgb } from '../core/color/transfer';
 import type { PrimariesId } from '../core/color/primaries';
 import { axisToUnit, legalBands, tickValues, unitSuffix } from '../core/scale/units';
@@ -259,11 +260,44 @@ function chartToScreen(
   return coord === 'xy' ? xyToScreen(x, y, w, h, 'xy') : xyToScreen(...xyToUv(x, y), w, h, 'uv');
 }
 
+/**
+ * Colour for one point on the locus.
+ *
+ * Spectral colours are outside sRGB, so a straight per-channel clamp destroys the
+ * hue ramp: clamping collapsed 65 samples onto 21 distinct colours, with three
+ * long pure runs (380-455 magenta, 515-550 green, 610-700 red). Drawn as a 3 px
+ * stroke that reads as three flat facets joined by hard corners, which is exactly
+ * the "the horseshoe has straight edges" report — the geometry was fine, the
+ * colour was not.
+ *
+ * Normalising by the brightest channel instead preserves the hue and only scales
+ * brightness. The locus outline is a reference curve, not a colour sample, so
+ * dropping luminance is harmless and keeps every 5 nm step a distinct colour.
+ */
 function locusHue(x: number, y: number): string {
-  const [r, g, b] = xyToLinearSrgb([x, y]);
-  const enc = (v: number): number =>
-    Math.round(Math.min(1, Math.max(0, linearToSrgb(Math.max(v, 0)))) * 255);
-  return `rgb(${enc(r)},${enc(g)},${enc(b)})`;
+  const lin = xyToLinearSrgb([x, y]);
+  const peak = Math.max(lin[0], lin[1], lin[2], 1e-6);
+  const enc = (v: number): number => Math.round(linearToSrgb(Math.min(1, Math.max(0, v / peak))) * 255);
+  return `rgb(${enc(lin[0])},${enc(lin[1])},${enc(lin[2])})`;
+}
+
+/**
+ * Subdivisions per locus segment so no drawn segment exceeds ~3 px.
+ *
+ * Chosen by measurement: at 550x287 a 5 nm table with 6 subdivisions still turns
+ * 6.5 degrees at the worst vertex, which is visible. 10 subdivisions brings that
+ * to 4.2 degrees and 3 px segments, where the polyline is no longer readable as
+ * straight edges.
+ */
+function locusSubdivisions(screen: readonly (readonly [number, number])[]): number {
+  let longest = 0;
+  for (let i = 1; i < screen.length; i++) {
+    const a = screen[i - 1]!;
+    const b = screen[i]!;
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (len > longest) longest = len;
+  }
+  return Math.max(6, Math.min(24, Math.ceil(longest / 3)));
 }
 
 export function drawCieGraticule(
@@ -274,26 +308,64 @@ export function drawCieGraticule(
   const h = o.height;
   ctx.clearRect(0, 0, w, h);
 
-  const pts = CIE1931_LOCUS.map((p) => chartToScreen(p[0], p[1], w, h, o.coord));
+  // Draw the locus through a spline rather than as chords. The table is 5 nm, so
+  // the vertices are already close, but the green to blue corner turns hard
+  // enough that even those chords read as a corner. Subdivision is chosen from
+  // the longest on-screen segment so the curve is equally smooth in a 275 px
+  // grid cell and a 1100 px single view; a fixed count was either jagged or
+  // wasteful depending on panel size.
+  const screen = CIE1931_LOCUS.map((p) => chartToScreen(p[0], p[1], w, h, o.coord));
+  const pts = smoothOpenSpline(screen, locusSubdivisions(screen));
 
   ctx.beginPath();
   pts.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
   ctx.closePath();
-  ctx.fillStyle = '#141b21';
-  ctx.fill();
+  // No fill. This canvas is stacked above the data canvas, so any opaque fill
+  // here hides the point cloud — which is exactly how the CIE panel came to look
+  // empty while its data layer was drawing correctly. Same rule the waveform
+  // graticule follows.
   ctx.strokeStyle = '#4a5a66';
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  ctx.lineWidth = 3;
-  for (let i = 0; i < pts.length; i++) {
-    const [x, y] = pts[i]!;
-    const [lx, ly] = CIE1931_LOCUS[i]!;
-    ctx.strokeStyle = locusHue(lx, ly);
+  // Colour the outline by wavelength, continuously.
+  //
+  // Two earlier attempts both read as "straight edges" even though the geometry
+  // was right (measured deviation from the true 1 nm locus: 0.15 css px):
+  //   - one 3 px stroke per 3 px segment, round caps: the caps bulge a semicircle
+  //     past every joint, scalloping the outer edge with a 3 px period
+  //   - one flat colour per 5 nm table entry: 65 hard hue steps along the arc,
+  //     which the eye reads as flat facets
+  //
+  // So: keep short segments, but use butt caps and extend each one by half the
+  // line width along its own tangent. Consecutive quads then overlap exactly
+  // instead of leaving notches, and the hue can vary per segment.
+  // 2 CSS px: the outline is a reference curve, and a thicker stroke turns each
+  // 5 nm colour step into a visible block, which is what "hard edges" looked like.
+  const lw = 2;
+  const half = lw / 2;
+  ctx.lineWidth = lw;
+  ctx.lineCap = 'butt';
+  ctx.lineJoin = 'miter';
+  const perSegment = pts.length > 1 ? (pts.length - 1) / (CIE1931_LOCUS.length - 1) : 1;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [x0, y0] = pts[i]!;
+    const [x1, y1] = pts[i + 1]!;
+    const len = Math.hypot(x1 - x0, y1 - y0);
+    if (len < 1e-6) continue;
+    const ux = (x1 - x0) / len;
+    const uy = (y1 - y0) / len;
+    // Interpolate the wavelength, then the hue, so the ramp is smooth.
+    const t = i / perSegment;
+    const k = Math.min(CIE1931_LOCUS.length - 1, Math.floor(t));
+    const k2 = Math.min(CIE1931_LOCUS.length - 1, k + 1);
+    const f = Math.min(1, Math.max(0, t - k));
+    const a = CIE1931_LOCUS[k]!;
+    const b = CIE1931_LOCUS[k2]!;
+    ctx.strokeStyle = locusHue(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f);
     ctx.beginPath();
-    ctx.moveTo(x, y);
-    const next = pts[Math.min(i + 1, pts.length - 1)]!;
-    ctx.lineTo(next[0], next[1]);
+    ctx.moveTo(x0 - ux * half, y0 - uy * half);
+    ctx.lineTo(x1 + ux * half, y1 + uy * half);
     ctx.stroke();
   }
 

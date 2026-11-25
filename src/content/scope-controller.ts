@@ -1,8 +1,11 @@
 import { configureCanvas, getDevice, initCanvas, type CanvasGpu } from '../gpu/device';
 import { SignalTexture } from '../gpu/signal-texture';
-import { Downscaler, analysisSize, type AnalysisPreset } from '../gpu/downscale';
+import { Downscaler, analysisSize, type AnalysisPreset, type AnalysisTexture } from '../gpu/downscale';
 import { ScopeRenderer, type ScopeMode, type ScopeOptions } from '../gpu/scope-renderer';
 import { drawGraticule } from '../ui/graticule';
+import { renderCie, renderVectorscope } from '../gpu/scatter-cpu';
+import { AnalysisReader, unpackRows } from '../gpu/analysis-reader';
+import { LUMA } from '../core/color/matrices';
 import type { PanelTargets } from '../ui/hud';
 import type { PrimariesId } from '../core/color/primaries';
 import {
@@ -56,6 +59,8 @@ export class ScopeController {
   private externalFailed = false;
   private rawPlanes: RawPlaneTexture | null = null;
   private readonly rawPool = new FrameBufferPool();
+  private analysisReader: AnalysisReader | null = null;
+  private lastScatterAt = 0;
   private rawDownscaler: Downscaler | null = null;
   private rawPending = false;
   /** Set by the owner so raw-path failures reach the UI instead of vanishing. */
@@ -156,14 +161,32 @@ export class ScopeController {
 
       // Hot path stays synchronous: no await per panel, so the four scopes are
       // submitted back to back and the GPU pipelines them.
+      // Scatter scopes are drawn from a CPU histogram. See scatter-cpu.ts for why.
+      const scatterTargets = this.targets.filter(
+        (t) => t.mode === 'vectorscope' || t.mode === 'cie',
+      );
+      const wantsScatter = scatterTargets.length > 0;
+      const scatterDue = wantsScatter && now - this.lastScatterAt >= this.scatterIntervalMs;
+      if (scatterDue) this.lastScatterAt = now;
+
       let firstRenderer: ScopeRenderer | null = null;
       for (const target of this.targets) {
+        if (target.mode === 'vectorscope' || target.mode === 'cie') {
+          // Their canvas is painted below, from pixels rather than density.
+          continue;
+        }
         const renderer = await this.rendererFor(target);
         if (!renderer) continue;
         renderer.submit(analysis);
         this.drawGraticule(target, renderer);
         firstRenderer ??= renderer;
       }
+      if (scatterDue) {
+        // Fire and forget: the plots appear when the readback lands, and a slow
+        // read must never stall the waveform pass.
+        void this.paintScatter(scatterTargets, analysis);
+      }
+
       this.callbacks.onFrameSubmitted();
 
       if (wantStats && firstRenderer) {
@@ -361,6 +384,70 @@ export class ScopeController {
     return this.downscaler;
   }
 
+  /** How often the scatter scopes are refreshed; they tolerate a low rate. */
+  private scatterIntervalMs = 100;
+
+  /**
+   * Paint the scatter scopes from the analysis pixels.
+   *
+   * Deliberately decoupled from the waveform pass and rate-limited: a readback is
+   * a synchronous GPU stall (1.5 MB for a 843x474 frame) and a vectorscope does
+   * not need to update at the video's frame rate to be readable.
+   */
+  private async paintScatter(
+    targets: PanelTargets[],
+    analysis: AnalysisTexture,
+  ): Promise<void> {
+    if (!this.device) return;
+    this.analysisReader ??= new AnalysisReader(this.device);
+    if (this.analysisReader.busy) return;
+    const raw = await this.analysisReader.read(analysis);
+    if (!raw || this.destroyed) return;
+    const packed = unpackRows(raw, analysis.width, analysis.height);
+
+    for (const t of targets) {
+      const opts = this.optionsFor(t.mode);
+      const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+      const cssW = Math.max(8, t.gpu.clientWidth);
+      const cssH = Math.max(8, t.gpu.clientHeight);
+      const dprW = Math.round(cssW * dpr);
+      const dprH = Math.round(cssH * dpr);
+      if (t.gpu.width !== dprW || t.gpu.height !== dprH) {
+        t.gpu.width = dprW;
+        t.gpu.height = dprH;
+      }
+      const ctx = t.gpu.getContext('2d');
+      if (!ctx) continue;
+      const plot = t.mode === 'vectorscope'
+        ? renderVectorscope(
+            packed,
+            analysis.width,
+            analysis.height,
+            dprW,
+            dprH,
+            LUMA[opts.matrix],
+            opts.zoom,
+          )
+        : renderCie(packed, analysis.width, analysis.height, dprW, dprH, opts.primaries, opts.coord);
+      ctx.putImageData(new ImageData(plot.data, plot.width, plot.height), 0, 0);
+      this.drawScatterGraticule(t, opts);
+    }
+  }
+
+  private drawScatterGraticule(t: PanelTargets, opts: ScopeOptions): void {
+    const ctx = t.grat.getContext('2d');
+    if (!ctx) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    const w = Math.max(1, Math.round(t.grat.clientWidth));
+    const h = Math.max(1, Math.round(t.grat.clientHeight));
+    if (t.grat.width !== Math.round(w * dpr) || t.grat.height !== Math.round(h * dpr)) {
+      t.grat.width = Math.round(w * dpr);
+      t.grat.height = Math.round(h * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawGraticule(ctx, { ...opts, width: w, height: h }, this.gamuts());
+  }
+
   /** Which upload path the last frame used; surfaced in diagnostics. */
   private lastUpload: 'external' | 'copy' | 'raw' = 'copy';
 
@@ -436,6 +523,8 @@ export class ScopeController {
     this.rawDownscaler?.destroy();
     this.rawDownscaler = null;
     this.rawPool.clear();
+    this.analysisReader?.destroy();
+    this.analysisReader = null;
     this.external?.destroy();
     this.external = null;
     this.device = null;

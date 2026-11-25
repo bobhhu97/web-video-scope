@@ -133,13 +133,24 @@ try {
       const plotTop = pad.top;
       const plotH = cssH - pad.top - pad.bottom;
 
-      // Brightest row near the right edge of the plot (the white step).
-      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-      const bmp = await createImageBitmap(canvas);
-      const oc = new OffscreenCanvas(bmp.width, bmp.height);
-      const ctx = oc.getContext('2d');
-      ctx.drawImage(bmp, 0, 0);
-      const d = ctx.getImageData(0, 0, bmp.width, bmp.height).data;
+      // A WebGPU canvas only holds real pixels once presented; createImageBitmap
+      // can win that race and read an empty buffer. Poll until a lit pixel exists.
+      let bmp = null;
+      let d = null;
+      for (let attempt = 0; attempt < 40; attempt++) {
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        bmp = await createImageBitmap(canvas);
+        const oc = new OffscreenCanvas(bmp.width, bmp.height);
+        const c2 = oc.getContext('2d');
+        c2.drawImage(bmp, 0, 0);
+        d = c2.getImageData(0, 0, bmp.width, bmp.height).data;
+        let lit = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          if (d[i] + d[i + 1] + d[i + 2] > 60) { lit++; if (lit > 20) break; }
+        }
+        if (lit > 20) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
 
       const peakAt = (fracX) => {
         const x = Math.round((pad.left + (cssW - pad.left - pad.right) * fracX) * dpr);

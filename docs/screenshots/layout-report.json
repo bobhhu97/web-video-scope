@@ -29,15 +29,44 @@
   },
   "geo": {
     "dpr": 2,
-    "cssW": 274,
-    "cssH": 142,
-    "devW": 548,
-    "devH": 284,
-    "topInsetCss": 22,
+    "cssW": 550,
+    "cssH": 287,
+    "devW": 1100,
+    "devH": 574,
+    "topInsetCss": 33.5,
     "leftInsetCss": 44,
-    "rightGapCss": 10,
-    "peakIre": 100.3,
-    "labelPixels": 1686,
+    "rightGapCss": 10.5,
+    "peakIre": 100.1,
+    "debug": {
+      "canvasW": 1100,
+      "canvasH": 574,
+      "cssW": 550,
+      "cssH": 287,
+      "dpr": 2,
+      "grids": 1,
+      "gridClass": "grid single",
+      "gridRect": {
+        "w": 558,
+        "h": 295
+      },
+      "hostRect": {
+        "w": 560,
+        "h": 420
+      },
+      "panelRect": {
+        "w": 560,
+        "h": 422
+      },
+      "gridStyle": {
+        "cols": "550px",
+        "rows": "287.211px",
+        "cls": "grid single"
+      },
+      "cells": [
+        "waveform-luma:550x287"
+      ]
+    },
+    "labelPixels": 2771,
     "badge": "axis:limited"
   }
 }

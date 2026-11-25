@@ -257,6 +257,9 @@ export class ScopeRenderer {
     const compute = encoder.beginComputePass();
     compute.setPipeline(this.accumulatePipeline);
     compute.setBindGroup(0, accBind);
+    // Without this dispatch the accumulate pass did nothing: the density buffer
+    // stayed cleared and every waveform came out empty. The resolve pass still
+    // ran, which is why the graticule and axis labels appeared over a blank plot.
     compute.dispatchWorkgroups(Math.ceil(analysis.width / 8), Math.ceil(analysis.height / 8));
     compute.end();
 

@@ -85,17 +85,32 @@ harness draws its own 2D canvas; it has no bearing on the scope pipeline.
 pnpm test              # unit tests (vitest)
 pnpm build             # production bundle
 pnpm icons             # regenerate icons from scripts/make-icons.mjs
-pnpm verify:manifest   # manifest + CSP + bundle integrity (36 checks)
+pnpm verify:manifest   # manifest + CSP + bundle integrity (32 checks)
 pnpm verify            # pixel-measured scope checks in real Chrome + WebGPU
 pnpm verify:e2e        # injects the built content script on a live <video>
+pnpm verify:ui         # panel layout: all four counts, geometry, IRE axis (15 checks)
+pnpm verify:scatter    # vectorscope + CIE point clouds and locus curve (12 checks)
 pnpm verify:all        # everything above
 pnpm bench:upload      # compare zero-copy vs copying upload paths
 ```
 
-The two browser suites drive real Chrome over WebGPU and assert on measured
-pixels (for example "a 75% legal bar must read 75 ± 4 IRE", "switching units must
-not move the trace"), not on screenshots. Screenshots land in
+The browser suites drive real Chrome over WebGPU and assert on measured pixels
+(for example "a 75% legal bar must read 75 ± 4 IRE", "the 3 button must yield
+three sized panels"), not on screenshots. Screenshots land in
 `docs/screenshots/`.
+
+Two notes on reading those suites:
+
+- **A blank measurement is not always a blank scope.** A WebGPU canvas only holds
+  pixels once it has been presented, and `createImageBitmap` can win that race and
+  read transparent black. Every suite polls until a lit pixel appears; a single
+  sample after two `rAF`s produced intermittent "the waveform is empty" results
+  for a panel that was drawing correctly.
+- **A grey ramp cannot test the point-cloud scopes.** Every pixel of a neutral
+  ramp has one chromaticity, so a correct CIE plot shows a single dot — visually
+  identical to a broken one. `verify:scatter` therefore uses colour bars, and
+  `verify:cie-fill` uses a hue x saturation sweep, which is the only fixture that
+  can show whether the plot fills in the way real footage makes it.
 
 `public/test-harness.html` is a standalone page for manual inspection; it renders
 known patterns through `captureStream` and accepts `?range=`, `?units=`,
