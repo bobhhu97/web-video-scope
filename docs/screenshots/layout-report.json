@@ -1,0 +1,43 @@
+{
+  "ui": {
+    "dpr": 2,
+    "panelH": 422,
+    "gridH": 295,
+    "optsH": 65,
+    "navButtons": [
+      "Wave",
+      "RGB",
+      "Parade",
+      "Vector",
+      "CIE"
+    ],
+    "optsVisible": true,
+    "gridGetsMostSpace": true,
+    "layoutValue": "grid"
+  },
+  "afterPick": {
+    "navBtnExists": true,
+    "navBtnPressed": "true",
+    "count": 1,
+    "modes": [
+      "vectorscope"
+    ],
+    "layout": "single",
+    "pressed": [
+      "Vector"
+    ]
+  },
+  "geo": {
+    "dpr": 2,
+    "cssW": 274,
+    "cssH": 142,
+    "devW": 548,
+    "devH": 284,
+    "topInsetCss": 22,
+    "leftInsetCss": 44,
+    "rightGapCss": 10,
+    "peakIre": 100.3,
+    "labelPixels": 1686,
+    "badge": "axis:limited"
+  }
+}

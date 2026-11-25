@@ -30,15 +30,22 @@ export const DEFAULT_GOVERNOR: GovernorConfig = {
   settleFrames: 8,
 };
 
+/**
+ * What each quality tier changes: frame rate and analysis resolution only.
+ *
+ * Deliberately NOT the layout. Tiers used to carry a layout, which meant the
+ * governor silently reverted a user's single-scope choice back to a grid on the
+ * next tick. How many scopes are visible is a user decision.
+ */
 export const TIER_DESCRIPTION: Record<
   QualityTier,
-  { fps: number; preset: 'low' | 'default' | 'high'; layout: 'grid' | 'triple' | 'single' }
+  { fps: number; preset: 'low' | 'default' | 'high' }
 > = {
-  0: { fps: 60, preset: 'high', layout: 'grid' },
-  1: { fps: 30, preset: 'high', layout: 'grid' },
-  2: { fps: 30, preset: 'default', layout: 'grid' },
-  3: { fps: 20, preset: 'default', layout: 'triple' },
-  4: { fps: 15, preset: 'low', layout: 'single' },
+  0: { fps: 60, preset: 'high' },
+  1: { fps: 30, preset: 'high' },
+  2: { fps: 30, preset: 'default' },
+  3: { fps: 20, preset: 'default' },
+  4: { fps: 15, preset: 'low' },
 };
 
 export function initialGovernorState(): GovernorState {

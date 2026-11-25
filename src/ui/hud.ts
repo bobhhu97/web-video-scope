@@ -13,65 +13,133 @@ export interface HudHandlers {
   onStateChange(patch: Partial<HudState>): void;
   onLayoutChange(layout: Layout): void;
   onClose(): void;
-  /** Detach the panel into a Document Picture-in-Picture window. */
   onOpenPip(): void;
-  /** User clicked the quality badge: pin to the current tier, or unpin. */
   onToggleLock(): void;
 }
 
 const HOST_ID = 'video-scopes-host';
 
+/** Modes a user can pin into the single-view slot. */
+const MODE_LABELS: Record<ScopeMode, string> = {
+  'waveform-luma': 'Wave',
+  'waveform-rgb': 'RGB',
+  'waveform-parade': 'Parade',
+  vectorscope: 'Vector',
+  cie: 'CIE',
+};
+
 const STYLE = `
   :host { all: initial; }
+
+  /*
+   * Fixed column: header, picker, scopes, options. Only the scopes row flexes,
+   * so shrinking the window compresses the scopes and never hides the controls.
+   * The previous version put seven controls in a wrapping footer, which at
+   * narrow widths grew to three rows and squeezed the scopes to a sliver.
+   */
   .panel {
-    font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: #b9c6d0; background: #0b0f12f2;
-    border: 1px solid #ffffff1a; border-radius: 10px;
-    box-shadow: 0 10px 30px #0009;
-    overflow: hidden; resize: both;
-    min-width: 300px; min-height: 170px;
-    width: 760px;
+    display: flex; flex-direction: column;
+    height: 100%; min-height: 0;
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #b9c6d0; background: #0b0f12;
+    border: 1px solid #ffffff1a; border-radius: 8px;
+    overflow: hidden;
   }
+
   header {
-    display: flex; align-items: center; gap: 6px;
-    padding: 5px 8px; background: #12181d; cursor: move;
-    user-select: none; border-bottom: 1px solid #ffffff14;
+    display: flex; align-items: center; gap: 5px; flex: 0 0 auto;
+    padding: 4px 6px; background: #12181d;
+    cursor: move; user-select: none;
+    border-bottom: 1px solid #ffffff14;
   }
-  header .title { color: #d7e3ec; font-weight: 500; letter-spacing: .02em; }
+  header .title { color: #d7e3ec; font-weight: 500; }
   header .spacer { flex: 1; }
+
   .badge {
-    padding: 1px 6px; border-radius: 999px; background: #1c262d;
-    color: #8ea3b0; white-space: nowrap;
+    padding: 0 5px; border-radius: 999px; background: #1c262d;
+    color: #8ea3b0; white-space: nowrap; font-size: 10px;
   }
-  .badge.warn { background: #3a2a12; color: #f0c070; }
   .badge.ok { background: #16291d; color: #8cd9a5; }
+  .badge.warn { background: #3a2a12; color: #f0c070; }
   .badge.locked { background: #16243a; color: #8ab4e8; }
+  .badge.mono { font-variant-numeric: tabular-nums; cursor: pointer; }
+
   button {
-    font: inherit; color: #cfe0ea; background: #16202a;
-    border: 1px solid #ffffff20; border-radius: 5px;
-    padding: 1px 6px; cursor: pointer;
+    font: inherit; font-size: 11px; color: #cfe0ea; background: #16202a;
+    border: 1px solid #ffffff20; border-radius: 4px;
+    padding: 0 6px; cursor: pointer; line-height: 1.7;
   }
   button:hover { background: #1d2a36; }
-  .grid { display: grid; gap: 3px; padding: 6px; }
-  .grid.single { grid-template-columns: 1fr; }
-  .grid.grid { grid-template-columns: 1fr 1fr; }
-  .grid.triple { grid-template-columns: 1fr; }
+  button[aria-pressed="true"] {
+    background: #1e3a52; border-color: #4e7fa8; color: #cfe6fa;
+  }
+
+  /* ---- scope picker ---------------------------------------------------- */
+  nav.modes {
+    display: flex; gap: 3px; flex: 0 0 auto;
+    padding: 4px 6px; background: #0f1418;
+    border-bottom: 1px solid #ffffff10;
+    overflow-x: auto; scrollbar-width: none;
+  }
+  nav.modes::-webkit-scrollbar { display: none; }
+  nav.modes button { white-space: nowrap; }
+
+  /* ---- scope area ------------------------------------------------------ */
+  .grid {
+    flex: 1 1 auto; min-height: 0;
+    display: grid; gap: 3px; padding: 4px;
+    background: #080b0e;
+  }
+  /* Height is the scarce resource: the scopes are wide and short. */
+  .grid.single { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+  .grid.grid { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+  .grid.triple { grid-template-columns: 1fr; grid-template-rows: repeat(3, 1fr); }
+
   .cell {
-    position: relative; background: #0d1117; border-radius: 5px;
-    overflow: hidden; border: 1px solid #ffffff0f;
+    position: relative; min-width: 0; min-height: 0;
+    background: #0d1117; border-radius: 3px; overflow: hidden;
   }
   .cell canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   .cell canvas.grat { pointer-events: none; }
-  footer {
-    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
-    padding: 5px 8px; border-top: 1px solid #ffffff14; background: #0f1418;
+  .cell .tag {
+    position: absolute; top: 2px; right: 4px; z-index: 2;
+    font-size: 9px; color: #ffffff38; pointer-events: none;
   }
-  footer label { display: inline-flex; align-items: center; gap: 3px; color: #8ea3b0; }
+
+  /* ---- options, collapsible ------------------------------------------- */
+  details.options {
+    flex: 0 0 auto; background: #0f1418;
+    border-top: 1px solid #ffffff14;
+    max-height: 45%; overflow-y: auto;
+  }
+  details.options > summary {
+    padding: 3px 8px; cursor: pointer; color: #8ea3b0;
+    list-style: none; user-select: none;
+  }
+  details.options > summary::-webkit-details-marker { display: none; }
+  details.options > summary::before { content: '▸ '; }
+  details.options[open] > summary::before { content: '▾ '; }
+  .opts {
+    display: grid; gap: 4px 10px; padding: 0 8px 7px;
+    grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+    align-items: center;
+  }
+  .opts label {
+    display: grid; grid-template-columns: auto 1fr; gap: 4px;
+    align-items: center; color: #8ea3b0; font-size: 10px;
+  }
   select {
-    font: inherit; color: #cfe0ea; background: #16202a;
-    border: 1px solid #ffffff20; border-radius: 5px; padding: 1px 3px;
+    font: inherit; font-size: 10px; color: #cfe0ea; background: #16202a;
+    border: 1px solid #ffffff20; border-radius: 4px;
+    padding: 0 2px; width: 100%; min-width: 0;
   }
-  input[type=range] { width: 62px; accent-color: #4e7fa8; }
+  input[type=range] { width: 100%; min-width: 0; accent-color: #4e7fa8; margin: 0; }
+
+  .notice {
+    flex: 0 0 auto; margin: 0; padding: 3px 8px;
+    font-size: 10px; background: #3a2a12; color: #f0c070;
+    border-bottom: 1px solid #ffffff10;
+  }
 `;
 
 export class Hud {
@@ -100,22 +168,16 @@ export class Hud {
     host.id = HOST_ID;
     // `all: initial` MUST come first: it resets every property, so writing it
     // after `position: fixed` silently drops the host back into normal flow.
-    //
-    // The inset values are set here rather than via applyPosition() because
-    // applyPosition() early-returns while `this.host` is still null. A fixed
-    // element with no inset resolves to its *static* position — the end of
-    // documentElement — which on a tall page like YouTube is several screens
-    // below the viewport. That renders the panel but makes it invisible.
     host.style.cssText =
-      'all:initial;position:fixed;top:16px;right:16px;left:auto;z-index:2147483646;';
+      'all:initial;position:fixed;top:16px;right:16px;left:auto;' +
+      'width:720px;height:540px;min-width:320px;min-height:260px;' +
+      'z-index:2147483646;resize:both;overflow:hidden;';
 
     const root = host.attachShadow({ mode: 'open' });
     root.innerHTML = this.template();
 
     this.host = host;
     this.root = root;
-    // Assign this.host first, then let the persisted position override the
-    // defaults above.
     this.applyPosition();
     document.documentElement.appendChild(host);
 
@@ -131,73 +193,78 @@ export class Hud {
     this.canvases.clear();
   }
 
-  /** Live GPU + graticule canvases for the currently visible panels. */
   panelCanvases(): PanelTargets[] {
     return Array.from(this.canvases.values());
   }
 
+  /**
+   * Adopt the host's state for presentation-only fields.
+   *
+   * Deliberately does NOT overwrite `layout` or `mode`: those describe which
+   * canvases exist, and rebuilding them is a side effect that must only happen
+   * through relayout()/setSingleMode(). Assigning them here let a late
+   * refreshHud() replace a freshly rebuilt single view with a stale grid.
+   */
   setState(state: HudState): void {
-    this.state = state;
+    const { layout: _layout, mode: _mode, ...rest } = state;
+    this.state = { ...this.state, ...rest };
     this.applyPosition();
     this.syncInputs();
+    this.syncModeButtons();
   }
 
   relayout(layout: Layout): void {
     if (!this.root) return;
-    this.state = { ...this.state, layout };
     const grid = this.root.querySelector('.grid') as HTMLElement | null;
     if (!grid) return;
     grid.className = `grid ${layout}`;
-    this.buildCells();
+    // Use the layout the caller just asserted, not a locally cached copy that a
+    // racing setState() may already have overwritten.
+    this.buildCells(layout);
   }
 
-  /**
-   * Source metadata, prefixed `src:` to distinguish it from the range the scopes
-   * are currently drawing on.
-   *
-   * Two badges used to present range independently — this one from the decoder's
-   * metadata, the other from the detector's verdict — so they could disagree
-   * with no explanation. When a file is labelled limited but its content extends
-   * past legal white, the axis draws on `full` and the trace passes 100 IRE. That
-   * looked like a rendering bug rather than the diagnostic it is.
-   */
+  /** Switch which scope fills the single-view slot. */
+  setSingleMode(mode: ScopeMode): void {
+    this.state = { ...this.state, mode };
+    this.syncModeButtons();
+    if (this.state.layout === 'single') {
+      const grid = this.root?.querySelector('.grid') as HTMLElement | null;
+      if (grid) {
+        grid.className = 'grid single';
+        this.buildCells();
+      }
+    }
+  }
+
   setColorInfo(info: ColorSpaceInfo): void {
     const el = this.root?.getElementById('cs');
     if (!el) return;
     const range = info.fullRange === null ? 'range?' : info.fullRange ? 'full' : 'limited';
-    const parts = [
-      (info.matrix ?? '?').toUpperCase(),
-      `src:${range}`,
-      info.transfer,
-    ];
+    const parts = [(info.matrix ?? '?').toUpperCase(), `src:${range}`, info.transfer];
     if (info.format) parts.push(info.format);
     el.textContent = parts.join(' · ');
     el.title =
-      'Colour metadata read from the video decoder. ' +
-      'The scopes draw on the axis shown by the status badge, which may differ ' +
-      'when the content does not match its label.';
+      'Colour metadata read from the decoder. The scopes may draw on a different ' +
+      'axis — see the axis badge.';
   }
 
   setDiagnosis(d: RangeDiagnosis): void {
     const status = this.root?.getElementById('status');
     const warn = this.root?.getElementById('warn');
     if (status) {
-      // "axis:full" states plainly which scale the trace is plotted against,
-      // which is the thing a reading above 100 IRE depends on.
-      status.textContent = `axis:${d.effective} · ${d.source}`;
+      status.textContent = `axis:${d.effective}`;
       status.className = `badge ${d.effective === 'full' ? 'ok' : ''}`;
       status.title =
         d.effective === 'full'
-          ? 'Plotting on a full-range axis (0-255). A signal that is already full range will read above 100 IRE.'
+          ? 'Plotting on a full-range axis (0-255). Content with headroom reads above 100 IRE.'
           : 'Plotting on a limited-range axis (16-235). Legal white reads 100 IRE.';
     }
     if (warn) {
       if (d.warning) {
         warn.hidden = false;
         warn.textContent =
-          d.warning === 'limited-treated-as-full'
-            ? '⚠ limited read as full'
-            : '⚠ full read as limited';
+          d.warning === 'limited-treated-as-full' ? '⚠ limited as full' : '⚠ full as limited';
+        warn.title = d.warning;
       } else {
         warn.hidden = true;
       }
@@ -213,25 +280,24 @@ export class Hud {
     const el = this.root?.getElementById('perf');
     if (!el) return;
     const locked = this.state.lockedTier !== null;
-    const parts = [`${Math.round(fps)} fps`];
-    if (gpuMs !== null) parts.push(`${gpuMs.toFixed(1)} ms`);
-    // `0copy` means the frame never left the GPU; `copy` means it was uploaded.
+    const parts = [`${Math.round(fps)}fps`];
+    if (gpuMs !== null) parts.push(`${gpuMs.toFixed(1)}ms`);
     if (upload === 'external') parts.push('0copy');
     else if (upload) parts.push(upload);
-    parts.push(locked ? `lock:${tier}` : `auto:${tier}`);
-    el.textContent = parts.join(' · ');
-    el.className = `badge ${locked ? 'locked' : ''}`;
+    parts.push(locked ? `lock:${tier}` : `t${tier}`);
+    el.textContent = parts.join(' ');
+    el.className = `badge mono ${locked ? 'locked' : ''}`;
   }
 
-  setProbe(text: string | null): void {
-    const el = this.root?.getElementById('probe');
+  setNotice(text: string | null): void {
+    const el = this.root?.getElementById('notice');
     if (!el) return;
     el.hidden = text === null;
     if (text !== null) el.textContent = text;
   }
 
-  setNotice(text: string | null): void {
-    const el = this.root?.getElementById('notice');
+  setProbe(text: string | null): void {
+    const el = this.root?.getElementById('probe');
     if (!el) return;
     el.hidden = text === null;
     if (text !== null) el.textContent = text;
@@ -255,73 +321,86 @@ export class Hud {
       <style>${STYLE}</style>
       <div class="panel">
         <header>
-          <span class="title">Video Scopes</span>
-          <span class="badge" id="status">detecting…</span>
+          <span class="title">Scopes</span>
+          <span class="badge" id="status">axis:–</span>
           <span class="badge" id="cs">–</span>
           <span class="badge warn" id="warn" hidden></span>
           <span class="spacer"></span>
-          <span class="badge" id="perf">–</span>
-          <button id="pip" title="Open in a always-on-top window">⧉</button>
+          <span class="badge mono" id="perf">–</span>
           <button id="close" title="Close (Alt+S)">✕</button>
         </header>
-        <div class="badge warn" id="notice" hidden style="margin:6px 8px 0"></div>
-        <div class="badge" id="probe" hidden style="margin:6px 8px 0"></div>
+
+        <div class="notice" id="notice" hidden></div>
+        <div class="notice" id="probe" hidden></div>
+
+        <nav class="modes" id="modes"></nav>
+
         <div class="grid ${this.state.layout}"></div>
-        <footer>
-          <label>units
-            <select id="units">
-              <option value="ire">IRE</option>
-              <option value="code8">8-bit</option>
-              <option value="code10">10-bit</option>
-              <option value="mv">mV</option>
-              <option value="nits">nits</option>
-            </select>
-          </label>
-          <label>range
-            <select id="range">
-              <option value="auto">auto</option>
-              <option value="limited">limited</option>
-              <option value="full">full</option>
-            </select>
-          </label>
-          <label>layout
-            <select id="layout">
-              <option value="grid">2×2</option>
-              <option value="triple">1×3</option>
-              <option value="single">single</option>
-            </select>
-          </label>
-          <label>cie
-            <select id="coord">
-              <option value="xy">1931 xy</option>
-              <option value="uv">1976 u'v'</option>
-            </select>
-          </label>
-          <label title="raw reads decoder YUV planes; exact code values for HDR">signal
-            <select id="signal">
-              <option value="display">display</option>
-              <option value="raw">raw</option>
-            </select>
-          </label>
-          <label>gain <input id="gain" type="range" min="0.2" max="3" step="0.1"></label>
-          <label>zoom <input id="zoom" type="range" min="1" max="8" step="1"></label>
-        </footer>
+
+        <details class="options" open>
+          <summary>Options</summary>
+          <div class="opts">
+            <label>layout
+              <select id="layout">
+                <option value="grid">2×2</option>
+                <option value="triple">1×3</option>
+                <option value="single">Single</option>
+              </select>
+            </label>
+            <label>units
+              <select id="units">
+                <option value="ire">IRE</option>
+                <option value="code8">8-bit</option>
+                <option value="code10">10-bit</option>
+                <option value="mv">mV</option>
+                <option value="nits">nits</option>
+              </select>
+            </label>
+            <label>range
+              <select id="range">
+                <option value="auto">auto</option>
+                <option value="limited">limited</option>
+                <option value="full">full</option>
+              </select>
+            </label>
+            <label>signal
+              <select id="signal">
+                <option value="display">display</option>
+                <option value="raw">raw YUV</option>
+              </select>
+            </label>
+            <label>CIE
+              <select id="coord">
+                <option value="xy">1931 xy</option>
+                <option value="uv">1976 u'v'</option>
+              </select>
+            </label>
+            <label>gain
+              <input id="gain" type="range" min="0.2" max="3" step="0.1">
+            </label>
+            <label>zoom
+              <input id="zoom" type="range" min="1" max="8" step="1">
+            </label>
+          </div>
+        </details>
       </div>`;
   }
 
-  private buildCells(): void {
+  private buildCells(layout: Layout = this.state.layout): void {
     const root = this.root;
     if (!root) return;
     const grid = root.querySelector('.grid') as HTMLElement;
-    const modes = panelsForLayout(this.state.layout, this.state.mode);
+    const modes = panelsForLayout(layout, this.state.mode);
 
     grid.innerHTML = modes
-      .map((m) => {
-        const square = m === 'cie' || m === 'vectorscope';
-        return `<div class="cell" data-mode="${m}" style="aspect-ratio:${square ? '1/1' : '2/1'}">
-          <canvas class="gpu"></canvas><canvas class="grat"></canvas>
-        </div>`;
-      })
+      .map(
+        (m) =>
+          `<div class="cell" data-mode="${m}">
+             <canvas class="gpu"></canvas>
+             <canvas class="grat"></canvas>
+             <span class="tag">${MODE_LABELS[m]}</span>
+           </div>`,
+      )
       .join('');
 
     this.canvases.clear();
@@ -333,39 +412,81 @@ export class Hud {
     }
   }
 
+  private syncModeButtons(): void {
+    const nav = this.root?.getElementById('modes');
+    if (!nav) return;
+    for (const btn of Array.from(nav.querySelectorAll<HTMLButtonElement>('button'))) {
+      btn.setAttribute('aria-pressed', btn.dataset.mode === this.state.mode ? 'true' : 'false');
+    }
+  }
+
   private wire(): void {
     const root = this.root;
     if (!root) return;
 
-    root.getElementById('close')?.addEventListener('click', () => this.handlers.onClose());
+    // Scope picker. Choosing a scope switches to single view: in a multi-panel
+    // layout "use this scope" has no other sensible meaning, and it is the
+    // fastest way to get one scope big enough to read.
+    const nav = root.getElementById('modes')!;
+    nav.innerHTML = (Object.keys(MODE_LABELS) as ScopeMode[])
+      .map((m) => `<button data-mode="${m}" type="button">${MODE_LABELS[m]}</button>`)
+      .join('');
+    for (const btn of Array.from(nav.querySelectorAll<HTMLButtonElement>('button'))) {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.mode as ScopeMode;
+        // Record the choice locally first: onLayoutChange rebuilds the cells from
+        // this.state.mode, so switching layout before the mode is known would
+        // rebuild the grid with the previous scope (or the whole grid again).
+        // Set the local state first so every later render reads a consistent
+        // (mode, layout) pair. Then notify: mode change only updates the
+        // highlight, layout change rebuilds the grid exactly once.
+        this.state = { ...this.state, mode, layout: 'single' };
+        this.handlers.onStateChange({ mode, layout: 'single' });
+        this.handlers.onLayoutChange('single');
+      });
+    }
 
-    root.getElementById('units')?.addEventListener('change', (e) => {
-      this.handlers.onStateChange({ units: (e.target as HTMLSelectElement).value as HudState['units'] });
-    });
-    root.getElementById('range')?.addEventListener('change', (e) => {
-      this.handlers.onStateChange({
-        rangeMode: (e.target as HTMLSelectElement).value as HudState['rangeMode'],
-      });
-    });
-    root.getElementById('layout')?.addEventListener('change', (e) => {
-      this.handlers.onLayoutChange((e.target as HTMLSelectElement).value as Layout);
-    });
-    root.getElementById('coord')?.addEventListener('change', (e) => {
-      this.handlers.onStateChange({ coord: (e.target as HTMLSelectElement).value as HudState['coord'] });
-    });
-    root.getElementById('signal')?.addEventListener('change', (e) => {
-      this.handlers.onStateChange({
-        signalMode: (e.target as HTMLSelectElement).value as HudState['signalMode'],
-      });
-    });
-    root.getElementById('gain')?.addEventListener('input', (e) => {
-      this.handlers.onStateChange({ gain: Number((e.target as HTMLInputElement).value) });
-    });
-    root.getElementById('zoom')?.addEventListener('input', (e) => {
-      this.handlers.onStateChange({ zoom: Number((e.target as HTMLInputElement).value) });
-    });
+    root.getElementById('close')?.addEventListener('click', () => this.handlers.onClose());
     root.getElementById('perf')?.addEventListener('click', () => this.handlers.onToggleLock());
-    root.getElementById('pip')?.addEventListener('click', () => this.handlers.onOpenPip());
+
+    const bind = (
+      id: string,
+      ev: string,
+      fn: (el: HTMLSelectElement | HTMLInputElement) => void,
+    ): void => {
+      const el = root.getElementById(id) as HTMLSelectElement | HTMLInputElement | null;
+      el?.addEventListener(ev, () => {
+        // Ignore events caused by writing the value ourselves.
+        if (this.syncing || !el) return;
+        fn(el);
+      });
+    };
+
+    bind('layout', 'change', (el) => {
+      this.handlers.onLayoutChange((el as HTMLSelectElement).value as Layout);
+    });
+    bind('units', 'change', (el) => {
+      this.handlers.onStateChange({ units: (el as HTMLSelectElement).value as HudState['units'] });
+    });
+    bind('range', 'change', (el) => {
+      this.handlers.onStateChange({
+        rangeMode: (el as HTMLSelectElement).value as HudState['rangeMode'],
+      });
+    });
+    bind('signal', 'change', (el) => {
+      this.handlers.onStateChange({
+        signalMode: (el as HTMLSelectElement).value as HudState['signalMode'],
+      });
+    });
+    bind('coord', 'change', (el) => {
+      this.handlers.onStateChange({ coord: (el as HTMLSelectElement).value as HudState['coord'] });
+    });
+    bind('gain', 'input', (el) => {
+      this.handlers.onStateChange({ gain: Number((el as HTMLInputElement).value) });
+    });
+    bind('zoom', 'input', (el) => {
+      this.handlers.onStateChange({ zoom: Number((el as HTMLInputElement).value) });
+    });
 
     const header = root.querySelector('header') as HTMLElement;
     let drag: { x: number; y: number; left: number; top: number } | null = null;
@@ -377,11 +498,9 @@ export class Hud {
     });
     header.addEventListener('pointermove', (e) => {
       if (!drag || !this.host) return;
-      const left = Math.max(0, drag.left + e.clientX - drag.x);
-      const top = Math.max(0, drag.top + e.clientY - drag.y);
-      this.host.style.left = `${left}px`;
+      this.host.style.left = `${Math.max(0, drag.left + e.clientX - drag.x)}px`;
       this.host.style.right = 'auto';
-      this.host.style.top = `${top}px`;
+      this.host.style.top = `${Math.max(0, drag.top + e.clientY - drag.y)}px`;
     });
     header.addEventListener('pointerup', () => {
       if (!drag || !this.host) return;
@@ -391,21 +510,32 @@ export class Hud {
         hostPosition: { left: Math.round(rect.left), top: Math.round(rect.top), right: 16 },
       });
     });
+
+    this.syncModeButtons();
   }
+
+  /** True while inputs are being written from state, so handlers ignore echoes. */
+  private syncing = false;
 
   private syncInputs(): void {
     const root = this.root;
     if (!root) return;
+    this.syncing = true;
     const set = (id: string, value: string): void => {
       const el = root.getElementById(id) as HTMLSelectElement | HTMLInputElement | null;
       if (el) el.value = value;
     };
+    set('layout', this.state.layout);
     set('units', this.state.units);
     set('range', this.state.rangeMode);
-    set('layout', this.state.layout);
-    set('coord', this.state.coord);
     set('signal', this.state.signalMode);
+    set('coord', this.state.coord);
     set('gain', String(this.state.gain));
     set('zoom', String(this.state.zoom));
+    // Release on the next task: assigning a <select> value can emit `change`
+    // asynchronously in some engines.
+    setTimeout(() => {
+      this.syncing = false;
+    }, 0);
   }
 }

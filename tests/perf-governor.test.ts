@@ -64,11 +64,17 @@ describe('stepGovernor', () => {
 });
 
 describe('TIER_DESCRIPTION', () => {
-  it('every tier names a valid fps, preset and layout', () => {
+  it('every tier names a valid fps and preset', () => {
     for (const t of [0, 1, 2, 3, 4] as const) {
       expect(TIER_DESCRIPTION[t].fps).toBeGreaterThan(0);
       expect(['low', 'default', 'high']).toContain(TIER_DESCRIPTION[t].preset);
-      expect(['grid', 'triple', 'single']).toContain(TIER_DESCRIPTION[t].layout);
+    }
+  });
+
+  it('tiers do not dictate layout', () => {
+    // Layout is the user's choice; a governor tick must never change it.
+    for (const t of [0, 1, 2, 3, 4] as const) {
+      expect(TIER_DESCRIPTION[t]).not.toHaveProperty('layout');
     }
   });
 

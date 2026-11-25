@@ -24,6 +24,12 @@ export interface ScopeOptions {
   primaries: PrimariesId;
   coord: 'xy' | 'uv';
   signalKind: 'display' | 'raw';
+  /**
+   * Device pixels per CSS pixel for the canvas this renderer draws into.
+   * `width`/`height` are device pixels; the graticule's padding constants are
+   * CSS pixels, so conversions need this.
+   */
+  dpr: number;
 }
 
 export const DEFAULT_SCOPE_OPTIONS: ScopeOptions = {
@@ -40,6 +46,7 @@ export const DEFAULT_SCOPE_OPTIONS: ScopeOptions = {
   primaries: 'rec709',
   coord: 'xy',
   signalKind: 'display',
+  dpr: 1,
 };
 
 /** accumulate.wgsl `accMode` */
@@ -136,9 +143,20 @@ export class ScopeRenderer {
    * graticule padding), so a value at 75 IRE lands exactly on the drawn 75 IRE
    * gridline instead of being stretched over the full canvas height.
    */
+  /**
+   * Plot rectangle in DEVICE pixels.
+   *
+   * `options.width/height` come from `canvas.width/height` (backing store), but
+   * WAVE_PAD is authored in CSS pixels. Subtracting CSS margins from a device-px
+   * size under-counts them on Retina, which made the drawn plot larger than the
+   * area the graticule reserves and let the trace spill past the border.
+   */
   private plotSize(): { w: number; h: number } {
-    const w = Math.max(8, Math.round(this.options.width - WAVE_PAD.left - WAVE_PAD.right));
-    const h = Math.max(8, Math.round(this.options.height - WAVE_PAD.top - WAVE_PAD.bottom));
+    const dpr = this.options.dpr;
+    const padX = (WAVE_PAD.left + WAVE_PAD.right) * dpr;
+    const padY = (WAVE_PAD.top + WAVE_PAD.bottom) * dpr;
+    const w = Math.max(8, Math.round(this.options.width - padX));
+    const h = Math.max(8, Math.round(this.options.height - padY));
     return { w, h };
   }
 
@@ -208,7 +226,8 @@ export class ScopeRenderer {
     // Resolve needs canvas dims plus the plot rect so it can place the density
     // grid at the right offset. Field order must match ResolveParams exactly.
     ru.set([o.width, o.height, PLANES[o.mode], RES_MODE[o.mode]], 0); // size
-    ru.set([WAVE_PAD.left, WAVE_PAD.top, plot.w, plot.h], 4); // plot
+    const dpr = o.dpr;
+    ru.set([Math.round(WAVE_PAD.left * dpr), Math.round(WAVE_PAD.top * dpr), plot.w, plot.h], 4);
     rf.set([o.gain, o.gamma, o.zoom, o.coord === 'uv' ? 1 : 0], 8); // opts
     rf.set([0.45, 1.0, 0.6, 0], 12); // tint
     rf.set([c.kr, c.kg, c.kb, 0], 16); // coeff

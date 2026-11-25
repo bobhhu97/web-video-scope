@@ -71,13 +71,16 @@ export function drawWaveformGraticule(ctx: CanvasRenderingContext2D, o: ScopeOpt
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
 
-  // Label every tick only when there is room for it. In a 2x2 cell the plot can
-  // be under 200 px tall, where ten labels collide into a smear; thin them out
-  // while still drawing every gridline, so the scale stays accurate.
-  const MIN_LABEL_GAP = 22;
+  // Every gridline is drawn; labels are decimated by a stride chosen from the
+  // available height, never dropped arbitrarily. A fixed minimum gap silently
+  // produced an unlabelled scale whenever the plot was short.
   const ticks = tickValues(o.units, o.range);
-  let lastLabelY = Number.NEGATIVE_INFINITY;
-  for (const a of ticks) {
+  const LABEL_LINE_H = 13;
+  const maxLabels = Math.max(2, Math.floor(plotH / LABEL_LINE_H));
+  const stride = Math.max(1, Math.ceil(ticks.length / maxLabels));
+
+  for (let i = 0; i < ticks.length; i++) {
+    const a = ticks[i]!;
     const y = axisToCanvasY(a, plotTop, plotH, o.zoom);
     ctx.strokeStyle = GRID;
     ctx.beginPath();
@@ -85,9 +88,10 @@ export function drawWaveformGraticule(ctx: CanvasRenderingContext2D, o: ScopeOpt
     ctx.lineTo(plotLeft + plotW, y);
     ctx.stroke();
 
-    if (y - lastLabelY < MIN_LABEL_GAP) continue;
-    lastLabelY = y;
-    ctx.fillStyle = TEXT;
+    // Always label the first and last tick (0 and 100 IRE), then every stride.
+    const isEnd = i === 0 || i === ticks.length - 1;
+    if (!isEnd && i % stride !== 0) continue;
+    ctx.fillStyle = isEnd ? LEGAL : TEXT;
     ctx.fillText(String(Math.round(axisToUnit(a, o.units, o.range))), plotLeft - 5, y);
   }
 

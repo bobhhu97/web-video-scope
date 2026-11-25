@@ -70,9 +70,20 @@ export class ScopeController {
   ) {}
 
   setTargets(targets: PanelTargets[]): void {
-    for (const mode of this.renderers.keys()) {
-      if (!targets.some((t) => t.mode === mode)) {
-        this.renderers.get(mode)?.destroy();
+    for (const [mode, renderer] of this.renderers) {
+      const next = targets.find((t) => t.mode === mode);
+      // A layout change rebuilds the canvas elements, so a renderer keyed by
+      // mode may be bound to a canvas that is no longer in the document. Compare
+      // the element, not just the mode: reusing the old renderer left the new
+      // canvas blank (the scope drew into a detached element).
+      const gpu = this.gpus.get(mode);
+      const stale =
+        !next ||
+        !gpu ||
+        (gpu.context.canvas as HTMLCanvasElement) !== next.gpu ||
+        !next.gpu.isConnected;
+      if (stale) {
+        renderer.destroy();
         this.renderers.delete(mode);
         this.gpus.delete(mode);
       }
@@ -180,7 +191,9 @@ export class ScopeController {
       const resized = configureCanvas(gpu, target.gpu.clientWidth, target.gpu.clientHeight);
       if (resized) {
         const canvas = gpu.context.canvas as HTMLCanvasElement;
-        this.renderers.get(mode)?.resize(canvas.width, canvas.height);
+        const r = this.renderers.get(mode);
+        r?.resize(canvas.width, canvas.height);
+        r?.setOptions({ dpr: Math.min(window.devicePixelRatio || 1, 2.5) });
       }
     }
   }
@@ -363,8 +376,21 @@ export class ScopeController {
     const gpu = await initCanvas(target.gpu);
     if (this.destroyed) return null;
     this.gpus.set(target.mode, gpu);
+
+    // Size the backing store BEFORE creating the renderer. A freshly inserted
+    // canvas is 300x150 by default; the renderer snapshots its dimensions in the
+    // constructor, so creating it first left it drawing into the wrong size and
+    // the scope appeared blank until some later resize corrected it.
+    configureCanvas(gpu, target.gpu.clientWidth, target.gpu.clientHeight);
+
     const canvas = gpu.context.canvas as HTMLCanvasElement;
-    const opts = { ...this.optionsFor(target.mode), width: canvas.width, height: canvas.height };
+    const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    const opts = {
+      ...this.optionsFor(target.mode),
+      width: canvas.width,
+      height: canvas.height,
+      dpr,
+    };
     const renderer = new ScopeRenderer(gpu, opts);
     this.renderers.set(target.mode, renderer);
     return renderer;

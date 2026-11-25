@@ -125,12 +125,12 @@ function applyTier(tier: QualityTier): void {
   const d = TIER_DESCRIPTION[tier];
   loop?.setTargetFps(d.fps);
   controller?.setMinInterval(1000 / d.fps);
-  if (state.layout !== d.layout && state.lockedTier === null) {
-    state = { ...state, layout: d.layout };
-    hud?.relayout(d.layout);
-    hud?.setState(state);
-    controller?.setTargets(hud?.panelCanvases() ?? []);
-  }
+
+  // Quality tiers adjust workload — frame rate and analysis resolution — and
+  // nothing else. They used to also force a layout, which silently overrode the
+  // user's choice: picking a single scope switched to `single`, then the next
+  // governor tick reverted it to `grid`. Which panels are on screen is a user
+  // decision, not a performance knob.
   void saveSettings(state);
 }
 
@@ -146,10 +146,16 @@ function refreshHud(): void {
 
 function onDiagnosis(hist: Uint32Array, total: number): void {
   const diagnosis = rangeDetector.push(colorInfo, histogramStats(hist, total));
-  hud?.setDiagnosis(diagnosis);
   const next = applyRangeMode(state.rangeMode, colorInfo, diagnosis);
   const changed = next.limited !== effectiveRange.limited || next.depth !== effectiveRange.depth;
   effectiveRange = next;
+
+  // Report what the scopes are actually drawing on, derived from the same value
+  // handed to the renderer. Showing the detector's verdict instead let the badge
+  // claim "axis:limited" while the shader plotted on a full-range axis, which is
+  // how a legal white reading reached 119 IRE with no explanation.
+  hud?.setDiagnosis({ ...diagnosis, effective: effectiveRange.limited ? 'limited' : 'full' });
+
   if (changed) controller?.setOptionsFor(optionsForMode);
 }
 
@@ -223,6 +229,15 @@ function buildController(): void {
   );
   controller.setMinInterval(1000 / TIER_DESCRIPTION[currentTier()].fps);
   controller.setSignalMode(state.signalMode);
+  // Test seam: expose the range the renderer was actually constructed with.
+  (window as unknown as { __scopeDebug?: unknown }).__scopeDebug = {
+    get range() {
+      return effectiveRange.limited ? 'limited' : 'full';
+    },
+    get effective() {
+      return state.rangeMode;
+    },
+  };
   controller.onRawError = (msg) => hud?.setNotice(`Raw mode unavailable: ${msg}`);
 }
 
@@ -265,19 +280,29 @@ async function enable(): Promise<void> {
 function buildHud(): Hud {
   return new Hud(state, {
     onStateChange(patch) {
-      const modeChanged = patch.signalMode !== undefined && patch.signalMode !== state.signalMode;
+      const signalChanged = patch.signalMode !== undefined && patch.signalMode !== state.signalMode;
+      const modeChanged = patch.mode !== undefined && patch.mode !== state.mode;
       state = { ...state, ...patch };
       void saveSettings(state);
-      if (modeChanged) controller?.setSignalMode(state.signalMode);
+      if (signalChanged) controller?.setSignalMode(state.signalMode);
+      if (modeChanged) {
+        // Highlight only. Cell rebuilds belong to onLayoutChange, which the
+        // caller invokes explicitly; rebuilding here raced with it and the
+        // loser overwrote the grid with the old layout.
+        hud?.setSingleMode(state.mode);
+      }
       refreshHud();
     },
     onLayoutChange(layout: Layout) {
       state = { ...state, layout };
       void saveSettings(state);
+      // One pass: push state, rebuild the cells, then hand the new canvases to
+      // the controller. Calling setState again afterwards re-synced inputs but
+      // also re-ran the mode highlight, which could re-assert the old grid.
       hud?.relayout(layout);
-      hud?.setState(state);
       controller?.setTargets(hud?.panelCanvases() ?? []);
       controller?.setOptionsFor(optionsForMode);
+      void saveSettings(state);
     },
     onClose() {
       void disable();
