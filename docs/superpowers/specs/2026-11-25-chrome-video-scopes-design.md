@@ -73,13 +73,53 @@ L3 若不可用（老版本 Chrome / 元素不可定位），UI 顶部显示不�
 
 ### 4.3 GPU 管线（每帧）
 
-1. **Decode pass**：全屏三角采样 `texture_external` → `rgba16float` 的 `signalTex`（分析分辨率，默认 960×540，可设 Full/Half/Quarter）。
+**核心设计：先把源帧降采样到固定分析分辨率，再跑所有示波器。** 这一步把开销与源分辨率彻底解耦——4K 视频和 720p 视频的开销完全一样，而且比「跳点采样」更抗锯齿（双线性平均 vs 抽取单点）。
+
+1. **Downscale pass**（每帧一次，所有示波器共享）：`rgba8unorm` 源帧 → `rgba8unorm` 分析纹理，默认 **640×360**（竖屏自动交换为 360×640）。一个全屏三角 + `textureSampleLevel` 即可，开销约 0.05 ms。
 2. **Clear pass**：清零所有启用的密度缓冲（`R32Uint` storage）。
-3. **Gather pass**（每个示波器一个 compute）：`textureLoad(signalTex)` → 色彩数学 → `atomicAdd` 到密度缓冲。
+3. **Gather pass**（每个示波器一个 compute，`@workgroup_size(8,8)`）：`textureLoad(analysisTex)` → 色彩数学 → `atomicAdd` 到密度缓冲。每个示波器只处理 230k 像素。
 4. **Resolve pass**：fragment shader 读密度，荧光映射 `I = 1 - exp(-n·gain)`，写 canvas（`alphaMode: 'premultiplied'`，背景透明）。
 5. **Graticule** 由独立 2D canvas 在 DOM 下层绘制并缓存，刻度变化才重绘（保证文字锐利，省一次纹理上传）。
 
-### 4.4 色彩数学
+**开销对比（1080p 源，四个示波器同时开，60 fps）：**
+
+| 方案 | 每示波器像素 | 4 示波器总计 | 相对全分辨率 |
+| --- | --- | --- | --- |
+| 全分辨率逐次采样 | 2,073,600 | 498 M px/s | 100% |
+| 跳步采样 stride=4 | 129,600 | 78 M px/s | 25% |
+| **固定降采样 640×360** | **230,400** | **55 M px/s** | **11%** |
+
+固定降采样在 4K 源上只需全分辨率的 **2.8%**，且不随源分辨率变化。这是「流畅优先」的落点。
+
+**分析分辨率档位**：`360×203`（省电）/ `640×360`（默认）/ `960×540`（高质量）。仅切换此档位才需要重建管线。
+
+### 4.4 流畅度保障（第一优先级）
+
+用户明确要求「优先保障流畅度，不追求绝对高精度」。因此性能是一等约束，精度是可调档位。
+
+**四道防线，从重到轻：**
+
+1. **固定分析分辨率**（§4.3）：不管源是 720p 还是 4K，每个示波器只处理 ≤230k 像素。
+2. **帧驱动而非时钟驱动**：`requestVideoFrameCallback` 保证「视频出多少帧就分析多少帧」，绝不空转；暂停时 0 GPU 开销。
+3. **分析频率与显示频率解耦**：默认 `analysisFps = 30`，即使视频 60fps，示波器也只每两帧更新一次。密度缓冲会累积多次采样，视觉上更平滑，开销减半。用户可在设置里选 15 / 30 / 60。
+4. **自适应降载**（关键）：用滑动窗口测单帧 GPU 时间（`GPUQueue.onSubmittedWorkDone()`），连续 20 帧超过预算就自动降一档：
+
+```
+预算 4ms/帧（16.6ms 的 24%）
+超预算 -> analysisFps 30 -> 20  (再超) -> 15
+       -> analysisPreset default -> low
+       -> 布局 grid(4 个) -> triple(3 个) -> single(1 个)
+回落 3 秒稳定后，逐级恢复，但每次只升一档且需连续稳定 60 帧
+```
+
+UI 状态栏会显示当前档位（例如 `30fps · 640×360 · auto↓`），点击可锁定手动档位，避免自动调节造成观感抖动。
+
+**精度取舍的边界（不做的事）：**
+- **不做**「为了省性能而放弃 range 识别」：读取 `VideoFrame.colorSpace` 是免费的，码值轴映射是一个乘加。省掉它得到的不是低精度示波器，而是会说谎的示波器。
+- **不做**「低质量时关闭 atomic 累加改用点采样」：那会引入摩尔纹和假峰值，比降分辨率更伤可信度。
+- **可以降的**：分析分辨率、更新频率、同时显示的示波器数量、示波器画布的 CSS 尺寸（不影响数据）。
+
+### 4.5 色彩数学
 
 亮度系数：
 
@@ -124,7 +164,7 @@ Rec.2020     : 0.636958 0.144617 0.168881 / 0.262700 0.677998 0.059302 / 0.00000
 
 CIE 1976：`u' = 4X / (X + 15Y + 3Z)`，`v' = 9Y / (X + 15Y + 3Z)`。
 
-### 4.5 Video range 诊断
+### 4.6 Video range 诊断
 
 1. **元数据直读**（权威）：`new VideoFrame(video).colorSpace.fullRange`、`.matrix`、`.primaries`、`.transfer`、`frame.format`。
 2. **统计启发式**（发现错标）：对每帧亮度直方图取 `P0.1` / `P99.9` 与越界比例。
@@ -165,7 +205,7 @@ CIE 1976：`u' = 4X / (X + 15Y + 3Z)`，`v' = 9Y / (X + 15Y + 3Z)`。
 - **画中画**：`documentPictureInPicture.requestWindow()` 拉出独立置顶窗口，示波器可放第二屏。
 - **像素探针**：按住 `Alt` 在视频上移动，显示该点码值与色度，并在三个示波器上联动十字线。
 - **快捷键**：`Alt+S` 开关 HUD，`Alt+1..4` 切视图，`Alt+R` 切 range 覆盖。
-- **性能徽章**：显示当前 analysis FPS 与单帧 GPU 耗时（`timestamp-query` 可用时）。
+- **性能徽章**：显示当前分析帧率、单帧 GPU 耗时、分析分辨率与当前档位（如 `30fps · 640×360 · 2.1ms · auto`）；点击可锁定档位。
 
 ## 7. 目录结构
 
@@ -185,10 +225,11 @@ chrome-video-scopes/
 │   │   ├── color/  matrices.ts  primaries.ts  transfer.ts  locus.ts
 │   │   ├── scale/  quantize.ts（码值轴）  units.ts（IRE/code/mV/nits）
 │   │   ├── range-detector.ts
+│   │   ├── perf-governor.ts  gpu-timer.ts   # 自适应降载
 │   │   └── scopes/ stats.ts  reference.ts（CPU 基准）  plan.ts
 │   ├── gpu/
-│   │   ├── device.ts  signal-texture.ts  raw-planes.ts  scope-renderer.ts
-│   │   └── shaders/ accumulate.wgsl  resolve.wgsl
+│   │   ├── device.ts  signal-texture.ts  downscale.ts  raw-planes.ts  scope-renderer.ts
+│   │   └── shaders/ downscale.wgsl  accumulate.wgsl  resolve.wgsl
 │   └── ui/  hud.ts（只做 DOM）  graticule.ts  probe.ts  settings.ts
 └── tests/  *.test.ts
 ```
@@ -213,7 +254,12 @@ chrome-video-scopes/
   - Vectorscope 六色 75% 靶标误差 < 2 px（512 px 画布、无缩放）。
   - CIE 图上纯红/绿/蓝落在对应原色顶点 ±0.004 色度单位内。
   - Range 诊断对「Limited 码值但标 Full」的片源 3 帧内告警，对正常片连续 10 秒不误报。
-- 1080p60 YouTube 播放，四个示波器全开，fps ≥ 55；单帧 compute 分派无 `GPUValidationError`。
+**流畅度（第一优先级）**
+- 1080p60 YouTube 播放，四个示波器全开，`video.getVideoPlaybackQuality().droppedVideoFrames` 10 秒内不增长（页面视频不掉帧是第一验收项）。
+- 单帧 GPU 耗时（`onSubmittedWorkDone` 上界）默认档位下 < 4 ms。
+- 6× CPU throttle 下 2 秒内自动降档，解除后 3–5 秒恢复且不来回抖动。
+- 分析尺寸与源分辨率解耦：1280×720 与 3840×2160 源都分析为 640×360，GPU 耗时差异 < 10%。
+- 视频暂停时 GPU 开销归零。
 - 全屏（YouTube `f`）后 HUD 仍在可视区。
 - 关闭 HUD 再打开 5 次，`performance.memory` 无持续增长（`destroy()` 覆盖 texture/buffer）。
 - 单元测试覆盖：`matrices` `primaries` `transfer` `quantize` `units` `locus` `range-detector` `reference` `signal-texture` `graticule` `vectorscope-geometry` `cie-geometry` `plan` `raw-layout`。

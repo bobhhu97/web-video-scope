@@ -4,7 +4,9 @@
 
 **Goal:** 构建一个 Manifest V3 Chrome 插件，在任意网页播放的视频上叠加实时波形（Y/RGB/RGB Parade）、矢量示波器、CIE 1931/1976 色度图，并准确识别 video range 与色彩元数据。
 
-**Architecture:** content script 用 `requestVideoFrameCallback` 驱动帧同步，`copyExternalImageToTexture` 把显示编码后的像素送入 WebGPU `rgba8unorm` 信号纹理；每个示波器一条 compute 管线把像素原子累加到 `array<atomic<u32>>` 密度缓冲，再由 fragment shader 做荧光映射与合成为透明 canvas；刻度网由独立 2D canvas 绘制在 DOM 下层。跨源视频走三层捕获瀑布流（L1 零拷贝 → L2 DNR 注入 CORS → L3 tabCapture + Element Restriction）。
+**Architecture:** content script 用 `requestVideoFrameCallback` 驱动帧同步，`copyExternalImageToTexture` 把显示编码后的像素送入全分辨率 `rgba8unorm` 信号纹理；**每帧一次降采样**到固定分析分辨率（默认 640×360），所有示波器共享这张分析纹理——因此开销与源分辨率解耦（4K 仅为全分辨率的 2.8%）；每个示波器一条 compute 管线把像素原子累加到 `array<atomic<u32>>` 密度缓冲，再由 fragment shader 做荧光映射与合成为透明 canvas；刻度网由独立 2D canvas 绘制在 DOM 下层。跨源视频走三层捕获瀑布流（L1 零拷贝 → L2 DNR 注入 CORS → L3 tabCapture + Element Restriction）。
+
+**性能是第一约束**（用户明确要求优先流畅、不追求绝对高精度）：固定分析分辨率 + 帧驱动 + 30fps 默认分析频率 + 自适应降载（可测的 4ms GPU 预算，连续超预算才降档）。
 
 **Tech Stack:** TypeScript、Vite（多入口 library build）、WebGPU（WGSL compute + render）、Canvas 2D（graticule）、Vitest、Manifest V3。
 
@@ -16,6 +18,9 @@
 - 所有 UI 必须挂在 Shadow DOM 内，宿主根节点 `position: fixed; z-index: 2147483646; all: initial`。
 - 色彩常量（亮度系数、RGB→XYZ 矩阵）不得写死在任何 UI 代码里，只能来自 `src/core/color/`。
 - 分析流程必须由 `requestVideoFrameCallback` 驱动，禁止用裸 `requestAnimationFrame` 轮询视频帧（rAF 只用于渲染循环）。
+- **所有示波器必须读同一张降采样后的分析纹理**，禁止各自直接读全分辨率信号纹理——这是「开销与源分辨率解耦」的结构保证。
+- 分析分辨率默认 640×360（长边 640），任何新增 pass 不得让它随源分辨率增长。
+- 单帧 GPU 预算 4 ms；超过就必须走 `perf-governor` 的降档路径，不允许「先上线再说」。
 - 任何新增源文件都必须有对应的 Vitest 单测或明确的浏览器内验证步骤（测试台页面 + 截图断言）。
 - 提交信息使用 Conventional Commits（`feat:` / `fix:` / `test:` / `chore:`）。
 
@@ -51,6 +56,8 @@ chrome-video-scopes/
 │   │   │   ├── quantize.ts      # 码值轴、Limited/Full 边界、axisMapping
 │   │   │   └── units.ts         # IRE / 8b / 10b / mV / nits 刻度
 │   │   ├── range-detector.ts    # 元数据优先 + 统计启发式错标检测
+│   │   ├── perf-governor.ts     # 自适应降载决策（纯函数）
+│   │   ├── gpu-timer.ts         # 每帧 GPU 耗时采样
 │   │   └── scopes/
 │   │       ├── stats.ts         # 直方图 → P0.1/P99.9/越界比例
 │   │       ├── reference.ts     # CPU 参考实现（GPU 的验收基准）+ CIE_BOUNDS
@@ -58,9 +65,11 @@ chrome-video-scopes/
 │   ├── gpu/
 │   │   ├── device.ts            # 共享 GPUDevice、canvas context、DPR 同步
 │   │   ├── signal-texture.ts    # copyExternalImageToTexture + 帧去重
+│   │   ├── downscale.ts         # 源帧 -> 固定分析分辨率（解耦源分辨率）
 │   │   ├── raw-planes.ts        # VideoFrame.copyTo → r8unorm + rg8unorm
 │   │   ├── scope-renderer.ts    # compute 累加 + resolve 合成
 │   │   └── shaders/
+│   │       ├── downscale.wgsl
 │   │       ├── accumulate.wgsl
 │   │       └── resolve.wgsl
 │   └── ui/
@@ -75,6 +84,7 @@ chrome-video-scopes/
     ├── signal-texture.test.ts  graticule.test.ts
     ├── vectorscope-geometry.test.ts  cie-geometry.test.ts
     ├── plan.test.ts      raw-layout.test.ts
+    ├── analysis-size.test.ts   perf-governor.test.ts
 ```
 
 ---
@@ -1938,23 +1948,35 @@ git commit -m "test(core): add CPU reference scope kernels as the GPU oracle"
 
 ---
 
-### Task 7: WebGPU 设备、信号纹理与内置测试台
+### Task 7: WebGPU 设备、信号纹理、降采样与内置测试台
 
 **Files:**
-- Create: `src/gpu/device.ts`, `src/gpu/signal-texture.ts`, `public/test-harness.html`, `public/harness.js`
-- Test: `tests/signal-texture.test.ts`
-- Modify: `vite.config.ts`（增加 `gpu` 入口，让测试台能 import）
+- Create: `src/gpu/device.ts`, `src/gpu/signal-texture.ts`, `src/gpu/downscale.ts`, `src/gpu/shaders/downscale.wgsl`, `public/test-harness.html`, `public/harness.js`
+- Test: `tests/signal-texture.test.ts`, `tests/analysis-size.test.ts`
+- Modify: `vite.config.ts`（增加 `harness` 模式，让测试台能 import）
 
 **Interfaces:**
 - Produces:
   - `interface CanvasGpu { device: GPUDevice; context: GPUCanvasContext; format: GPUTextureFormat }`
-  - `getDevice(): Promise<GPUDevice>` —— **全页共享一个 device**（多个示波器共用一个 `GPUDevice`，只各自持 canvas context）
+  - `getDevice(): Promise<GPUDevice>` —— **全页共享一个 device**
   - `initCanvas(canvas: HTMLCanvasElement): Promise<CanvasGpu>`
-  - `configureCanvas(gpu: CanvasGpu, width: number, height: number): void`（DPR 感知的 canvas 尺寸同步）
-  - `shouldUpload(readyState: number, currentTime: number, lastKey: number, minDelta?: number): boolean` —— 纯函数，可单测
-  - `class SignalTexture { constructor(device, source: HTMLVideoElement | VideoFrame); readonly texture; readonly width; readonly height; update(mediaTime?): boolean; destroy() }`
+  - `configureCanvas(gpu: CanvasGpu, cssWidth: number, cssHeight: number): boolean`（DPR 感知）
+  - `type AnalysisPreset = 'low' | 'default' | 'high'`
+  - `ANALYSIS_SIZES: Record<AnalysisPreset, number>`（**长边**像素：`320 | 640 | 854`，16:9 时即 `320×180 | 640×360 | 854×480`）
+  - `analysisSize(srcW: number, srcH: number, preset: AnalysisPreset, maxPixels?: number): { width: number; height: number }` —— 纯函数，保留宽高比、按长边缩放、不放大、按 `maxPixels` 二次夹紧
+  - `shouldUpload(readyState, currentTime, lastKey, minDelta?): boolean` —— 纯函数
+  - `class SignalTexture { ...update(mediaTime?): boolean }` —— 只做 `copyExternalImageToTexture`，**全分辨率**
+  - `interface AnalysisTexture { readonly texture: GPUTexture; readonly width: number; readonly height: number }` —— gather pass 唯一认识的信号形状
+  - `class Downscaler implements AnalysisTexture { constructor(device, width, height, wgsl); readonly texture; readonly width; readonly height; run(encoder, source: GPUTexture); destroy() }`
 
 **为什么共享 device:** 每个 canvas 各建一个 `GPUDevice` 会重复分配队列与内存池，四个示波器就是四份。一个 device + 四个 context 是 Chromium 推荐做法。
+
+**为什么把降采样独立成一个模块（而不是在 gather 里跳点）：**
+- 开销与源分辨率解耦：4K 和 720p 都只分析 640×360，4K 时仅为全分辨率的 2.8%。
+- 双线性平均优于抽取单点：细密的斜线/纹理不会在示波器上产生摩尔纹。
+- 一次降采样，所有示波器共享；每多开一个示波器只增加一次 230k 像素的 gather。
+
+**接口约定：** `analysisSize` 必须**不放大**（源比分析尺寸小就沿用源尺寸），否则小视频会被无意义地上采样，既费带宽又不增加信息。
 
 - [ ] **Step 1: 写失败测试 `tests/signal-texture.test.ts`**
 
@@ -2001,7 +2023,76 @@ describe('shouldUpload', () => {
 Run: `pnpm vitest run tests/signal-texture.test.ts`
 Expected: FAIL — cannot resolve `../src/gpu/signal-texture`。
 
-- [ ] **Step 3: 实现 `src/gpu/device.ts`**
+- [ ] **Step 3: 写失败测试 `tests/analysis-size.test.ts`**
+
+```ts
+import { describe, expect, it } from 'vitest';
+import { ANALYSIS_SIZES, analysisSize } from '../src/gpu/downscale';
+
+describe('analysisSize', () => {
+  it('scales 1080p landscape to 640x360 by default', () => {
+    expect(analysisSize(1920, 1080, 'default')).toEqual({ width: 640, height: 360 });
+  });
+
+  it('scales 4K to the same analysis size (source resolution independent)', () => {
+    expect(analysisSize(3840, 2160, 'default')).toEqual({ width: 640, height: 360 });
+  });
+
+  it('swaps axes for portrait video', () => {
+    const s = analysisSize(1080, 1920, 'default');
+    expect(s.width).toBe(360);
+    expect(s.height).toBe(640);
+  });
+
+  it('keeps the aspect ratio within one pixel', () => {
+    for (const [w, h] of [[1920, 1080], [1440, 1080], [3840, 1600], [1080, 1080]] as const) {
+      const s = analysisSize(w, h, 'default');
+      expect(Math.abs(s.width / s.height - w / h)).toBeLessThan(0.01);
+    }
+  });
+
+  it('never upscales a source smaller than the analysis size', () => {
+    expect(analysisSize(320, 180, 'default')).toEqual({ width: 320, height: 180 });
+    expect(analysisSize(640, 360, 'default')).toEqual({ width: 640, height: 360 });
+  });
+
+  it('presets are defined by long edge', () => {
+    expect(ANALYSIS_SIZES.low).toBe(320);
+    expect(ANALYSIS_SIZES.default).toBe(640);
+    expect(ANALYSIS_SIZES.high).toBe(854);
+    expect(analysisSize(1920, 1080, 'low')).toEqual({ width: 320, height: 180 });
+    expect(analysisSize(1920, 1080, 'default')).toEqual({ width: 640, height: 360 });
+  });
+
+  it('stays under the pixel budget on every preset', () => {
+    for (const preset of ['low', 'default', 'high'] as const) {
+      const s2 = analysisSize(3840, 2160, preset);
+      expect(s2.width * s2.height).toBeLessThanOrEqual(400_000);
+    }
+  });
+
+  it('honours a pixel budget cap', () => {
+    const capped = analysisSize(1920, 1080, 'high', 100_000);
+    expect(capped.width * capped.height).toBeLessThanOrEqual(100_000);
+  });
+
+  it('never returns a zero dimension', () => {
+    for (const [w, h] of [[1, 1], [1, 1000], [1000, 1], [3, 2]] as const) {
+      const s = analysisSize(w, h, 'default');
+      expect(s.width).toBeGreaterThanOrEqual(1);
+      expect(s.height).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('is stable: applying it twice changes nothing', () => {
+    const once = analysisSize(1920, 1080, 'default');
+    const twice = analysisSize(once.width, once.height, 'default');
+    expect(twice).toEqual(once);
+  });
+});
+```
+
+- [ ] **Step 4: 实现 `src/gpu/device.ts`**
 
 ```ts
 export interface CanvasGpu {
@@ -2051,7 +2142,7 @@ export function configureCanvas(gpu: CanvasGpu, cssWidth: number, cssHeight: num
 }
 ```
 
-- [ ] **Step 4: 实现 `src/gpu/signal-texture.ts`**
+- [ ] **Step 5: 实现 `src/gpu/signal-texture.ts`**
 
 ```ts
 type Source = HTMLVideoElement | VideoFrame;
@@ -2123,12 +2214,172 @@ export class SignalTexture {
 }
 ```
 
-- [ ] **Step 5: 运行测试**
+- [ ] **Step 6: 实现 `src/gpu/downscale.ts` 与 `src/gpu/shaders/downscale.wgsl`**
 
-Run: `pnpm vitest run tests/signal-texture.test.ts`
-Expected: 7 passed。
+```wgsl
+struct DownParams {
+  dstSize: vec2f,
+  pad: vec2f,
+};
 
-- [ ] **Step 6: 写 `public/test-harness.html`**
+@group(0) @binding(0) var srcTex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> dp: DownParams;
+
+struct VSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) uv: vec2f,
+}
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+  var pts = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  var o: VSOut;
+  o.pos = vec4f(pts[i], 0.0, 1.0);
+  o.uv = vec2f((pts[i].x + 1.0) * 0.5, (pts[i].y + 1.0) * 0.5);
+  return o;
+}
+
+@fragment fn fs(in: VSOut) -> @location(0) vec4f {
+  return vec4f(textureSampleLevel(srcTex, samp, in.uv, 0.0).rgb, 1.0);
+}
+```
+
+> 采样器必须是 `minFilter: 'linear'`，这样一次采样就完成双线性平均；若用 `nearest` 就退化成跳点采样，会重新引入摩尔纹。
+
+```ts
+export type AnalysisPreset = 'low' | 'default' | 'high';
+
+/**
+ * Long-edge pixel count per preset. Defining the long edge (not the height)
+ * means portrait and landscape share one knob and the aspect ratio never
+ * distorts. 640 long edge on 16:9 gives exactly 640x360.
+ */
+export const ANALYSIS_SIZES: Record<AnalysisPreset, number> = {
+  low: 320,
+  default: 640,
+  high: 854,
+};
+
+const MIN_DIM = 1;
+
+/**
+ * Pick the analysis texture size for a source.
+ * - preserves aspect ratio
+ * - scales by the preset's long edge
+ * - never upscales (a 320x180 source is analysed at 320x180)
+ * - optional maxPixels cap for very wide aspect ratios
+ */
+export function analysisSize(
+  srcW: number,
+  srcH: number,
+  preset: AnalysisPreset,
+  maxPixels = 400_000,
+): { width: number; height: number } {
+  if (srcW <= 0 || srcH <= 0) return { width: MIN_DIM, height: MIN_DIM };
+  const long = Math.max(srcW, srcH);
+  const target = ANALYSIS_SIZES[preset];
+  const scale = long <= target ? 1 : target / long;
+
+  let width = Math.max(MIN_DIM, Math.round(srcW * scale));
+  let height = Math.max(MIN_DIM, Math.round(srcH * scale));
+
+  const pixels = width * height;
+  if (pixels > maxPixels) {
+    const k = Math.sqrt(maxPixels / pixels);
+    width = Math.max(MIN_DIM, Math.floor(width * k));
+    height = Math.max(MIN_DIM, Math.floor(height * k));
+  }
+  return { width, height };
+}
+
+/** Anything the gather pass can read as its signal source. */
+export interface AnalysisTexture {
+  readonly texture: GPUTexture;
+  readonly width: number;
+  readonly height: number;
+}
+
+const DOWN_PARAMS_BYTES = 16;
+
+export class Downscaler implements AnalysisTexture {
+  readonly device: GPUDevice;
+  private pipeline: GPURenderPipeline;
+  private sampler: GPUSampler;
+  private params: GPUBuffer;
+  readonly texture: GPUTexture;
+  readonly width: number;
+  readonly height: number;
+
+  constructor(device: GPUDevice, width: number, height: number, code: string) {
+    this.device = device;
+    this.width = width;
+    this.height = height;
+    const module = device.createShaderModule({ code });
+    this.pipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module, entryPoint: 'vs' },
+      fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+    this.params = device.createBuffer({
+      size: DOWN_PARAMS_BYTES,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.texture = this.createTarget(width, height);
+    const p = new Float32Array([width, height, 0, 0]);
+    device.queue.writeBuffer(this.params, 0, p);
+  }
+
+  private createTarget(w: number, h: number): GPUTexture {
+    return this.device.createTexture({
+      size: { width: w, height: h },
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+  }
+
+  /** Draw the source texture into the analysis target. Costs one fullscreen triangle. */
+  run(encoder: GPUCommandEncoder, source: GPUTexture): void {
+    const bind = this.device.createBindGroup({
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: source.createView() },
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: { buffer: this.params } },
+      ],
+    });
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: this.texture.createView(),
+          loadOp: 'clear',
+          storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        },
+      ],
+    });
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(0, bind);
+    pass.draw(3);
+    pass.end();
+  }
+
+  destroy(): void {
+    this.texture.destroy();
+    this.params.destroy();
+  }
+}
+```
+
+> `Downscaler` 的 `texture` 只能作为 `TEXTURE_BINDING` 被 gather 读取，不能被 `copyExternalImageToTexture` 写入——这正是「上传一次、降采样一次、多个示波器共享」的结构保证。
+
+- [ ] **Step 7: 运行测试**
+
+Run: `pnpm vitest run tests/signal-texture.test.ts tests/analysis-size.test.ts`
+Expected: 16 passed。
+
+- [ ] **Step 8: 写 `public/test-harness.html`**
 
 ```html
 <!doctype html>
@@ -2173,7 +2424,7 @@ Expected: 7 passed。
 </html>
 ```
 
-- [ ] **Step 7: 写 `public/harness.js`（生成 Limited/Full 两版 SMPTE 彩条 + 灰阶斜坡，走真实 `<video>`；本任务只做 signal blit）**
+- [ ] **Step 9: 写 `public/harness.js`（生成 Limited/Full 两版 SMPTE 彩条 + 灰阶斜坡，走真实 `<video>`；本任务只做 signal blit）**
 
 > 本任务**只验证信号上传**，用一个最简 blit 管线把 `SignalTexture` 直接画到 canvas 上，逐像素比对左右两侧。`ScopeRenderer` 尚未存在（Task 8 建立），所以测试台此时不 import 它。
 
@@ -2305,13 +2556,14 @@ main().catch((e) => {
 });
 ```
 
-- [ ] **Step 8: 让测试台能 import TS 产物**
+- [ ] **Step 10: 让测试台能 import TS 产物**
 
 建 `src/harness-entry.ts`：
 
 ```ts
 export { initCanvas, configureCanvas, getDevice } from './gpu/device';
 export { SignalTexture } from './gpu/signal-texture';
+export { Downscaler, analysisSize, ANALYSIS_SIZES } from './gpu/downscale';
 ```
 
 `vite.config.ts` 加 `harness` 模式，输出 `dist/gpu/harness-bundle.js`：
@@ -2346,10 +2598,24 @@ export default defineConfig(({ mode }) => ({
 
 `package.json` 增加 `"harness": "vite build --mode harness"`。
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: 浏览器验证信号通路与降采样**
 
 ```bash
-git add src/gpu src/harness-entry.ts public vite.config.ts tests/signal-texture.test.ts docs/screenshots
+npx http-server dist -p 4173 -c-1
+```
+
+打开 `http://localhost:4173/test-harness.html?range=limited` 与 `?range=full`。
+Expected：
+- `status` 显示 `signal 1280x720`（信号纹理是**全分辨率**，未降采样）；
+- fps > 50；
+- DevTools console 无 `GPUValidationError`；
+- 额外在 console 里执行 `analysisSize(1280, 720, 'default')` 应返回 `{ width: 640, height: 360 }`。
+截图存 `docs/screenshots/task7-bootstrap.png`。
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add src/gpu src/harness-entry.ts public vite.config.ts tests/signal-texture.test.ts tests/analysis-size.test.ts docs/screenshots
 git commit -m "feat(gpu): shared device, signal texture and instrumented test harness"
 ```
 
@@ -2368,7 +2634,7 @@ git commit -m "feat(gpu): shared device, signal texture and instrumented test ha
   - `type ScopeMode = 'waveform-luma' | 'waveform-rgb' | 'waveform-parade' | 'vectorscope' | 'cie'`
   - `interface ScopeOptions { mode: ScopeMode; channel: 0 | 1 | 2 | 3; width: number; height: number; gain: number; gamma: number; zoom: number; units: Unit; range: RangeSpec; matrix: MatrixId; primaries: PrimariesId; coord: 'xy' | 'uv' }`
   - `DEFAULT_SCOPE_OPTIONS: ScopeOptions`
-  - `class ScopeRenderer { constructor(gpu, opts); resize(w, h); setOptions(partial); render(signal, readStats?): Promise<Uint32Array | null>; destroy() }`
+  - `class ScopeRenderer { constructor(gpu, opts); resize(w, h); setOptions(partial); render(analysis: AnalysisTexture, readStats?): Promise<Uint32Array | null>; destroy() }`
   - `drawWaveformGraticule(ctx, opts): void`
   - `axisToCanvasY(axis: number, plotTop: number, plotHeight: number, zoom?: number): number`
   - `canvasYToAxis(y: number, plotTop: number, plotHeight: number, zoom?: number): number`
@@ -2539,7 +2805,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 }
 ```
 
-> 这一版是**最终形态**：`signalKind` uniform 在此版本中仍被忽略（display 路径），Task 13 会为 raw 平面加 binding 4/5 并在 `main()` 内分叉。测试台在 Task 8 只跑 display 路径，因此此处不需要分支。
+> 这一版是**最终形态**：`signalKind` uniform 在此版本中仍被忽略（display 路径），Task 14 会为 raw 平面加 binding 4/5 并在 `main()` 内分叉。测试台在 Task 8 只跑 display 路径，因此此处不需要分支。
 
 > **Uniform 布局必须与 WGSL 结构体逐字节对齐**：`Params` = 7×`vec4` = 112 B（分配 128 B 留余量）；`ResolveParams` = 4×`vec4` = 64 B（分配 64 B）。两侧字段顺序必须完全一致，否则 shader 会静默读到垃圾值——这是 WebGPU 最常见的「波形全黑」原因。
 
@@ -2666,7 +2932,7 @@ import { PRIMARIES, type PrimariesId } from '../core/color/primaries';
 import { axisMapping, type RangeSpec } from '../core/scale/quantize';
 import type { Unit } from '../core/scale/units';
 import type { CanvasGpu } from './device';
-import type { SignalTexture } from './signal-texture';
+import type { AnalysisTexture } from './downscale';
 import accumulateWgsl from './shaders/accumulate.wgsl?raw';
 import resolveWgsl from './shaders/resolve.wgsl?raw';
 
@@ -2820,7 +3086,7 @@ export class ScopeRenderer {
     }
   }
 
-  async render(signal: SignalTexture, readStats = false): Promise<Uint32Array | null> {
+  async render(analysis: AnalysisTexture, readStats = false): Promise<Uint32Array | null> {
     if (this.destroyed) return null;
     const { device, context } = this.gpu;
     const o = this.options;
@@ -2831,7 +3097,9 @@ export class ScopeRenderer {
     const params = new ArrayBuffer(PARAMS_SIZE);
     const u32 = new Uint32Array(params);
     const f32 = new Float32Array(params);
-    u32.set([signal.width, signal.height, o.width, o.height], 0);
+    // Every scope reads the same downscaled analysis texture, so the dispatch
+    // cost is independent of the source resolution.
+    u32.set([analysis.width, analysis.height, o.width, o.height], 0);
     u32.set([ACC_MODE[o.mode], accChannel(o), o.coord === 'uv' ? 1 : 0, o.signalKind === 'raw' ? 1 : 0], 4);
     f32.set([c.kr, c.kg, c.kb, o.zoom], 8);
     f32.set([m[0]![0], m[0]![1], m[0]![2], 0], 12);
@@ -2852,7 +3120,7 @@ export class ScopeRenderer {
     const accBind = device.createBindGroup({
       layout: this.accumulatePipeline.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: signal.texture.createView() },
+        { binding: 0, resource: analysis.texture.createView() },
         { binding: 1, resource: { buffer: this.densityBuffer } },
         { binding: 2, resource: { buffer: this.histBuffer } },
         { binding: 3, resource: { buffer: this.paramsBuffer } },
@@ -2873,7 +3141,7 @@ export class ScopeRenderer {
     const compute = encoder.beginComputePass();
     compute.setPipeline(this.accumulatePipeline);
     compute.setBindGroup(0, accBind);
-    compute.dispatchWorkgroups(Math.ceil(signal.width / 8), Math.ceil(signal.height / 8));
+    compute.dispatchWorkgroups(Math.ceil(analysis.width / 8), Math.ceil(analysis.height / 8));
     compute.end();
 
     const render = encoder.beginRenderPass({
@@ -3042,7 +3310,9 @@ async function main() {
   });
   const gratCtx = gratCanvas.getContext('2d');
 
+  // One downscale per frame, shared by every scope on the page.
   let signal = null;
+  let downscaler = null;
   let frames = 0;
   let t0 = performance.now();
 
@@ -3058,16 +3328,23 @@ async function main() {
     if (video.readyState >= 2) {
       if (!signal || signal.width !== video.videoWidth) {
         signal?.destroy();
+        downscaler?.destroy();
         signal = new SignalTexture(gpu.device, video);
+        const a = analysisSize(signal.width, signal.height, params.get('analysis') ?? 'default');
+        downscaler = new Downscaler(gpu.device, a.width, a.height, DOWNSCALE_WGSL);
       }
       if (signal.update(video.currentTime)) {
-        renderer.render(signal).then(() => {
+        const encoder = gpu.device.createCommandEncoder();
+        downscaler.run(encoder, signal.texture);
+        gpu.device.queue.submit([encoder.finish()]);
+
+        renderer.render(downscaler).then(() => {
           frames++;
           const dt = performance.now() - t0;
           if (dt > 1000) {
             status.textContent =
-              `signal ${signal.width}x${signal.height} · ${limited ? 'limited' : 'full'} ` +
-              `· ${renderer.options.mode} · ${((frames * 1000) / dt).toFixed(0)} fps`;
+              `src ${signal.width}x${signal.height} · analysis ${downscaler.width}x${downscaler.height} · ` +
+              `${limited ? 'limited' : 'full'} · ${renderer.options.mode} · ${((frames * 1000) / dt).toFixed(0)} fps`;
             frames = 0;
             t0 = performance.now();
           }
@@ -3085,12 +3362,23 @@ async function main() {
 }
 ```
 
+顶部 import 追加：
+
+```js
+import { Downscaler, analysisSize } from './gpu/harness-bundle.js';
+import DOWNSCALE_WGSL from './gpu/downscale.wgsl?raw';
+```
+
+（`harness-entry.ts` 需一并 re-export `DOWNSCALE_WGSL`：`export { default as DOWNSCALE_WGSL } from './gpu/shaders/downscale.wgsl?raw';`）
+
 运行 `pnpm build && pnpm harness && npx http-server dist -p 4173 -c-1`。
 
 Expected（`?range=limited&units=ire`）：
 - 白条顶端落在 **75 IRE** 刻度线 ±0.5 IRE；
 - 灰阶阶梯最暗级落在 **0 IRE**、最亮级落在 **100 IRE**；
 - 底部约 6.3% 与顶部约 7.8% 有 Footroom/Headroom 浅带，16/235 处有虚线；
+- `status` 显示 `src 1280x720 · analysis 640x360`——分析尺寸与源尺寸解耦；
+- 加 `&analysis=low` 后 fps 不降反升，且波形形状与 `default` 肉眼一致。
 - 切 `?units=code8` 后同一波形的纵向位置**完全不变**，只有左侧标签变成 16/235（验证「换标尺不改几何」）。
 截图存 `docs/screenshots/task8-waveform.png`。
 
@@ -4042,7 +4330,7 @@ export class Hud {
 }
 ```
 
-> `Hud` 只负责 DOM 与交互回调，**不碰 canvas 绘制**。刻度与示波器的绘制全部由 `ScopeController`（Task 12）负责，避免两处各自持有 canvas 尺寸与 DPR 逻辑而互相覆盖。
+> `Hud` 只负责 DOM 与交互回调，**不碰 canvas 绘制**。刻度与示波器的绘制全部由 `ScopeController`（Task 13）负责，避免两处各自持有 canvas 尺寸与 DPR 逻辑而互相覆盖。
 
 }
 ```
@@ -4109,7 +4397,7 @@ async function disable(): Promise<void> {
 
 /**
  * Task 11 drives the loop but does not render yet: the GPU pipeline lands in
- * Task 12. Keeping the callback here means the rVFC wiring is already proven.
+ * Task 13. Keeping the callback here means the rVFC wiring is already proven.
  */
 async function onFrame(): Promise<void> {
   if (!detector?.video || !hud) return;
@@ -4143,7 +4431,7 @@ void (async () => {
 })();
 ```
 
-> 本任务交付「能开能关、能跟随全屏、能统计帧率」的 HUD，**不画任何示波器**。GPU 装配在 Task 12，届时只替换 `onFrame` 的实现，`enable`/`disable` 结构不变。
+> 本任务交付「能开能关、能跟随全屏、能统计帧率」的 HUD，**不画任何示波器**。GPU 装配在 Task 13，届时只替换 `onFrame` 的实现，`enable`/`disable` 结构不变。
 
 - [ ] **Step 7: 类型检查与手动验证**
 
@@ -4161,7 +4449,373 @@ git commit -m "feat(ui): shadow DOM HUD with rVFC driven frame loop and fullscre
 
 ---
 
-### Task 12: 色彩元数据提取、Range 状态栏与 GPU 装配
+### Task 12: 性能预算与自适应降载
+
+**Files:**
+- Create: `src/core/perf-governor.ts`, `src/core/gpu-timer.ts`
+- Test: `tests/perf-governor.test.ts`
+- Modify: `src/content/scope-controller.ts`（每帧计时 + 应用档位）、`src/content/index.ts`（档位 → analysisFps / preset / layout）、`src/ui/hud.ts`（显示并允许锁定档位）
+
+**为什么单独一个任务:** 「优先保障流畅度」不能靠拍脑袋说「应该够快」。必须有**可测的预算**、**可观测的耗时**、**确定性的降载规则**。把决策逻辑做成纯函数，才能在 node 里测到「连续 20 帧超预算才降档」「单次尖峰不降档」这类行为，而不是靠肉眼盯 fps。
+
+**Interfaces:**
+- Consumes: `AnalysisPreset`（Task 7），`ScopeController`（Task 13）
+- Produces:
+  - `type QualityTier = 0 | 1 | 2 | 3 | 4`
+  - `interface GovernorConfig { budgetMs; downAfter; upAfter; settleFrames }`
+  - `interface GovernorState { tier; over; under; settled }`
+  - `DEFAULT_GOVERNOR: GovernorConfig`（`budgetMs: 4, downAfter: 20, upAfter: 60, settleFrames: 8`）
+  - `TIER_DESCRIPTION: Record<QualityTier, { fps; preset; layout }>`
+  - `initialGovernorState(): GovernorState`（起始 tier 1 = 30fps）
+  - `stepGovernor(state, gpuMs | null, cfg?): GovernorState`
+  - `stepGovernorHard(state, gpuMs | null, cfg?): GovernorState`（灾难性单帧跳跃两档）
+  - `class GpuTimer { sample(device): Promise<number | null>; get lastMs(): number | null }`
+
+**档位表（越低越省）:**
+
+| tier | analysisFps | preset | layout |
+| --- | --- | --- | --- |
+| 0 | 60 | high | grid |
+| 1（默认） | 30 | high | grid |
+| 2 | 30 | default | grid |
+| 3 | 20 | default | triple |
+| 4 | 15 | low | single |
+
+`budgetMs = 4` 是 60fps 帧预算 16.6ms 的 24%，留足余量给页面自身的合成与解码。
+
+- [ ] **Step 1: 写失败测试 `tests/perf-governor.test.ts`**
+
+```ts
+import { describe, expect, it } from 'vitest';
+import {
+  DEFAULT_GOVERNOR,
+  TIER_DESCRIPTION,
+  initialGovernorState,
+  stepGovernor,
+  stepGovernorHard,
+  type GovernorState,
+} from '../src/core/perf-governor';
+
+const cfg = { ...DEFAULT_GOVERNOR, settleFrames: 0 };
+
+function run(n: number, gpuMs: number, from: GovernorState, c = cfg): GovernorState {
+  let s = from;
+  for (let i = 0; i < n; i++) s = stepGovernor(s, gpuMs, c);
+  return s;
+}
+
+describe('stepGovernor', () => {
+  it('steps down after enough consecutive over-budget frames', () => {
+    expect(run(20, 10, initialGovernorState()).tier).toBe(2);
+  });
+
+  it('does not step down on a short burst', () => {
+    expect(run(5, 10, initialGovernorState()).tier).toBe(1);
+  });
+
+  it('resets the over counter when a good frame arrives', () => {
+    let s = run(10, 10, initialGovernorState());
+    s = stepGovernor(s, 1, cfg);
+    s = run(10, 10, s);
+    expect(s.tier).toBe(1);
+  });
+
+  it('steps up only after a long stable period', () => {
+    expect(run(60, 1, initialGovernorState()).tier).toBe(0);
+  });
+
+  it('never goes below tier 0 or above tier 4', () => {
+    expect(run(500, 0.1, { ...initialGovernorState(), tier: 0 }).tier).toBe(0);
+    expect(run(500, 100, { ...initialGovernorState(), tier: 4 }).tier).toBe(4);
+  });
+
+  it('ignores null measurements', () => {
+    const s = initialGovernorState();
+    expect(stepGovernor(s, null, cfg)).toBe(s);
+  });
+
+  it('ignores frames right after a tier change (settle window)', () => {
+    const c = { ...DEFAULT_GOVERNOR };
+    let s: GovernorState = { tier: 1, over: 0, under: 0, settled: 0 };
+    for (let i = 0; i < c.settleFrames; i++) s = stepGovernor(s, 50, c);
+    expect(s.tier).toBe(1);
+  });
+
+  it('hard mode jumps two tiers on a catastrophic frame', () => {
+    expect(stepGovernorHard(initialGovernorState(), 40).tier).toBe(3);
+  });
+
+  it('hard mode clamps at tier 4 and delegates normal frames', () => {
+    expect(stepGovernorHard({ ...initialGovernorState(), tier: 3 }, 40).tier).toBe(4);
+    expect(stepGovernorHard(initialGovernorState(), 1).tier).toBe(1);
+  });
+});
+
+describe('TIER_DESCRIPTION', () => {
+  it('every tier names a valid fps, preset and layout', () => {
+    for (const t of [0, 1, 2, 3, 4] as const) {
+      expect(TIER_DESCRIPTION[t].fps).toBeGreaterThan(0);
+      expect(['low', 'default', 'high']).toContain(TIER_DESCRIPTION[t].preset);
+      expect(['grid', 'triple', 'single']).toContain(TIER_DESCRIPTION[t].layout);
+    }
+  });
+
+  it('is monotonic: quality never increases as the tier number grows', () => {
+    const order = { low: 0, default: 1, high: 2 } as const;
+    for (let t = 1; t <= 4; t++) {
+      expect(order[TIER_DESCRIPTION[t as 0].preset]).toBeLessThanOrEqual(
+        order[TIER_DESCRIPTION[(t - 1) as 0].preset],
+      );
+      expect(TIER_DESCRIPTION[t as 0].fps).toBeLessThanOrEqual(TIER_DESCRIPTION[(t - 1) as 0].fps);
+    }
+  });
+});
+```
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `pnpm vitest run tests/perf-governor.test.ts`
+Expected: FAIL — cannot resolve `../src/core/perf-governor`。
+
+- [ ] **Step 3: 实现 `src/core/perf-governor.ts`**
+
+```ts
+export type QualityTier = 0 | 1 | 2 | 3 | 4;
+
+export interface GovernorConfig {
+  /** Per-frame GPU budget in milliseconds. */
+  budgetMs: number;
+  /** Consecutive over-budget frames required before stepping down. */
+  downAfter: number;
+  /** Consecutive under-budget frames required before stepping up. */
+  upAfter: number;
+  /** Frames ignored right after a tier change (pipeline rebuild spikes). */
+  settleFrames: number;
+}
+
+export interface GovernorState {
+  tier: QualityTier;
+  over: number;
+  under: number;
+  settled: number;
+}
+
+export const DEFAULT_GOVERNOR: GovernorConfig = {
+  budgetMs: 4,
+  downAfter: 20,
+  upAfter: 60,
+  settleFrames: 8,
+};
+
+export const TIER_DESCRIPTION: Record<
+  QualityTier,
+  { fps: number; preset: 'low' | 'default' | 'high'; layout: 'grid' | 'triple' | 'single' }
+> = {
+  0: { fps: 60, preset: 'high', layout: 'grid' },
+  1: { fps: 30, preset: 'high', layout: 'grid' },
+  2: { fps: 30, preset: 'default', layout: 'grid' },
+  3: { fps: 20, preset: 'default', layout: 'triple' },
+  4: { fps: 15, preset: 'low', layout: 'single' },
+};
+
+export function initialGovernorState(): GovernorState {
+  return { tier: 1, over: 0, under: 0, settled: 0 };
+}
+
+export function stepGovernor(
+  state: GovernorState,
+  gpuMs: number | null,
+  cfg: GovernorConfig = DEFAULT_GOVERNOR,
+): GovernorState {
+  if (gpuMs === null) return state;
+  if (state.settled < cfg.settleFrames) {
+    return { ...state, settled: state.settled + 1 };
+  }
+  const over = gpuMs > cfg.budgetMs;
+  const next: GovernorState = {
+    ...state,
+    over: over ? state.over + 1 : 0,
+    under: over ? 0 : state.under + 1,
+  };
+  if (next.over >= cfg.downAfter && next.tier < 4) {
+    return { tier: (next.tier + 1) as QualityTier, over: 0, under: 0, settled: 0 };
+  }
+  if (next.under >= cfg.upAfter && next.tier > 0) {
+    return { tier: (next.tier - 1) as QualityTier, over: 0, under: 0, settled: 0 };
+  }
+  return next;
+}
+
+/** A single catastrophic frame skips a tier instead of waiting for the counter. */
+export function stepGovernorHard(
+  state: GovernorState,
+  gpuMs: number | null,
+  cfg: GovernorConfig = DEFAULT_GOVERNOR,
+): GovernorState {
+  if (gpuMs === null) return state;
+  if (gpuMs > cfg.budgetMs * 5 && state.tier < 4) {
+    const tier = Math.min(4, state.tier + 2) as QualityTier;
+    return { tier, over: 0, under: 0, settled: 0 };
+  }
+  return stepGovernor(state, gpuMs, cfg);
+}
+```
+
+- [ ] **Step 4: 运行确认通过**
+
+Run: `pnpm vitest run tests/perf-governor.test.ts`
+Expected: 11 passed（`stepGovernor` 9 项 + `TIER_DESCRIPTION` 2 项）。
+
+- [ ] **Step 5: 实现 `src/core/gpu-timer.ts`**
+
+```ts
+/**
+ * Measures how long the GPU actually takes for the work we submitted.
+ * `onSubmittedWorkDone` resolves when everything queued so far is finished,
+ * which is a good-enough proxy for "our per-frame cost". Returns null while a
+ * measurement is still in flight, so the governor simply skips that frame.
+ */
+export class GpuTimer {
+  private inFlight = false;
+  private last: number | null = null;
+
+  sample(device: GPUDevice): Promise<number | null> {
+    if (this.inFlight) return Promise.resolve(null);
+    this.inFlight = true;
+    const start = performance.now();
+    return device.queue
+      .onSubmittedWorkDone()
+      .then(() => {
+        this.last = performance.now() - start;
+        return this.last;
+      })
+      .catch(() => null)
+      .finally(() => {
+        this.inFlight = false;
+      });
+  }
+
+  get lastMs(): number | null {
+    return this.last;
+  }
+}
+```
+
+> `onSubmittedWorkDone` 测的是队列排空时间，包含等待与合成，因此是**上界**而非精确 GPU 时长。用它做降载判据反而更保守——宁可早降一档，也不要在用户视频上掉帧。若将来需要精确值，再接 `timestamp-query`；不要为此阻塞本任务。
+
+- [ ] **Step 6: 把档位接进 `ScopeController` 与 `index.ts`**
+
+`ScopeController` 增加一个构造参数与一个方法：
+
+```ts
+  constructor(
+    private targets: PanelTargets[],
+    private optionsFor: (mode: ScopeMode) => ScopeOptions,
+    private readonly callbacks: ControllerCallbacks,
+    private readonly gamuts: () => readonly PrimariesId[],
+    private readonly preset: () => AnalysisPreset,
+  ) {}
+```
+
+`rebuildSignal` 改用 `analysisSize(...)` 创建 `Downscaler`；`frame()` 在提交后调用 `callbacks.onFrameCost()`：
+
+```ts
+  async frame(video: HTMLVideoElement): Promise<void> {
+    if (this.destroyed || this.busy) return;
+    this.attach(video);
+    if (!this.signal || !this.downscaler) return;
+
+    const now = performance.now();
+    if (now - this.lastAnalysisAt < this.minIntervalMs) return;
+
+    if (!this.signal.update(video.currentTime)) return;
+    this.lastAnalysisAt = now;
+    this.busy = true;
+
+    try {
+      const encoder = this.device.createCommandEncoder();
+      this.downscaler.run(encoder, this.signal.texture);
+      this.device.queue.submit([encoder.finish()]);
+
+      let first = true;
+      for (const t of this.targets) {
+        const renderer = await this.rendererFor(t);
+        if (!renderer) continue;
+        const hist = await renderer.render(this.downscaler, first);
+        if (first && hist) {
+          this.callbacks.onDiagnosis(hist, this.downscaler.width * this.downscaler.height);
+        }
+        first = false;
+        this.drawGraticule(t);
+      }
+      this.callbacks.onFrameSubmitted();
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  setMinInterval(ms: number): void {
+    this.minIntervalMs = ms;
+  }
+```
+
+`index.ts` 里：
+
+```ts
+let governor = initialGovernorState();
+let lockedTier: QualityTier | null = null;
+const timer = new GpuTimer();
+
+function applyTier(tier: QualityTier): void {
+  const d = TIER_DESCRIPTION[tier];
+  controller?.setMinInterval(1000 / d.fps);
+  if (state.layout !== d.layout) {
+    hud?.relayout(d.layout);
+    state = { ...state, layout: d.layout };
+    controller?.setTargets(panelTargets());
+  }
+  hud?.setTier(tier, lockedTier !== null);
+}
+
+async function onFrameSubmitted(): Promise<void> {
+  const ms = await timer.sample(device);
+  if (ms === null) return;
+  const next = stepGovernorHard(governor, ms);
+  if (next.tier !== governor.tier && lockedTier === null) {
+    governor = next;
+    applyTier(governor.tier);
+  } else {
+    governor = next;
+  }
+  hud?.setPerf(timer.lastMs ?? 0, (1000 / Math.max(timer.lastMs ?? 1, 0.01)), governor.tier);
+}
+```
+
+> 用户手动锁定档位（`lockedTier`）后，governor 仍然继续测量并更新 UI 显示，但**不自动切档**——调色师通常宁可掉几帧也不希望画布突然从四宫格变成单格。
+
+- [ ] **Step 7: 在 HUD 里暴露档位**
+
+状态栏显示 `30fps · 640×360 · auto↓`；点击徽章在 `auto` 与 `lock@当前档` 之间切换。`Hud.setTier(tier, locked)` 更新徽章文案与颜色（自动降档用琥珀色，锁定用蓝色，正常用绿色）。
+
+- [ ] **Step 8: 浏览器验证降载真的生效**
+
+在 1080p60 页面上开四宫格，用 DevTools Performance 面板录 10 秒：
+- 若机器够快：档位应稳定在 tier 1（`30fps · 640×360`），主线程无长任务。
+- 用 DevTools 的 6x CPU throttle 模拟慢机：应在 2 秒内看到档位依次降到 tier 2 → 3，布局从 grid 变为 triple，波形仍可读。
+- 关闭 throttle 后约 3–5 秒内逐级恢复，且不来回跳动（抖动即说明 `settleFrames` 或 `upAfter` 设得太小）。
+
+截图存 `docs/screenshots/task12-governor.png`。
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/core/perf-governor.ts src/core/gpu-timer.ts src/content src/ui tests/perf-governor.test.ts docs/screenshots
+git commit -m "feat(perf): adaptive quality governor with measurable GPU budget"
+```
+
+---
+
+### Task 13: 色彩元数据提取、Range 状态栏与 GPU 装配
 
 **Files:**
 - Create: `src/content/color-space.ts`
@@ -4336,9 +4990,9 @@ export class ScopeController {
       for (const t of this.targets) {
         const renderer = await this.rendererFor(t);
         if (!renderer) continue;
-        const hist = await renderer.render(this.signal, first);
+        const hist = await renderer.render(analysis, first);
         if (first && hist) {
-          this.callbacks.onDiagnosis(hist, this.signal.width * this.signal.height);
+          this.callbacks.onDiagnosis(hist, analysis.width * analysis.height);
         }
         first = false;
         this.drawGraticule(t);
@@ -4690,7 +5344,7 @@ git commit -m "feat(content): metadata-driven range diagnosis wired into the sco
 
 ---
 
-### Task 13: Raw Plane 模式（精确码值，绕过显示色彩管理）
+### Task 14: Raw Plane 模式（精确码值，绕过显示色彩管理）
 
 **Files:**
 - Create: `src/gpu/raw-planes.ts`
@@ -5073,7 +5727,7 @@ git commit -m "feat(gpu): raw I420 plane path for exact code-value scopes"
 
 ---
 
-### Task 14: 像素探针与 Document PiP
+### Task 15: 像素探针与 Document PiP
 
 **Files:**
 - Create: `src/ui/probe.ts`
@@ -5174,7 +5828,7 @@ git commit -m "feat(ui): pixel probe crosshair and document picture-in-picture w
 
 ---
 
-### Task 15: 跨源兜底（L2 DNR + L3 tabCapture/Element Restriction）
+### Task 16: 跨源兜底（L2 DNR + L3 tabCapture/Element Restriction）
 
 **Files:**
 - Create: `src/background/offscreen.ts`, `src/background/capture.ts`, `offscreen.html`
@@ -5352,19 +6006,32 @@ git commit -m "feat(capture): tab capture with element restriction and DNR cors 
 
 ## 验收清单（对照 spec §9）
 
-- [ ] `pnpm test` 全绿：`matrices` `primaries` `transfer` `quantize` `units` `locus` `range-detector` `reference` `signal-texture` `graticule` `vectorscope-geometry` `cie-geometry` `plan` `raw-layout`。
-- [ ] 测试台 `?range=limited`：波形 75% 白条落在 75 IRE ±0.5，黑位在 0 IRE（轴高 6.3%）而非贴底；矢量六靶标偏差 < 2 px；CIE 三原色落顶点 ±0.004。
-- [ ] 同一素材切换 `units`（ire → code8 → code10 → mv → nits）后**波形几何完全不变**，只有标签变化。这条是「码值轴」正确性的直接判据。
-- [ ] Limited 与 Full 两版彩条的黑位在白/黑位高度上肉眼可区分（6.3% vs 0%）。
-- [ ] Range 诊断：对「Limited 码值但标为 Full」的素材 3 帧后告警；对正常素材连续 10 秒不误报；手动切 `Force Full/Limited` 后纵向标尺立即变化。
-- [ ] 1080p60 页面四示波器全开，perf 徽章 fps ≥ 55；单帧 compute 分派无 `GPUValidationError`。
-- [ ] YouTube 按 `f` 全屏后 HUD 仍在可视区；`Alt+S` 关闭后 `device.lost` 未触发、无 WebGPU 泄漏警告。
-- [ ] 关闭 HUD 再打开 5 次，`performance.memory` 无持续增长（说明 `destroy()` 覆盖了 texture/buffer）。
-- [ ] README 写完 spec §8 的四条已知限制（显示参考信号、DRM、L3 分辨率、跨源无 CORS）。
+**流畅度（第一优先级，先于精度验收）**
+
+- [ ] 1080p60 页面四示波器全开：视频本身不掉帧（用 DevTools Performance 确认无 >16ms 的长任务），`video.getVideoPlaybackQuality().droppedVideoFrames` 10 秒内不增长。
+- [ ] 分析尺寸与源解耦：`src 1280x720 · analysis 640x360`、`?analysis=low` 时 `analysis 320x180`，波形形状肉眼一致。
+- [ ] 自适应降载生效：6× CPU throttle 下 2 秒内档位下降且布局变简；解除后 3–5 秒逐级恢复且**不来回抖动**。
+- [ ] 暂停视频后 GPU 开销归零（`timer.lastMs` 不再更新，无 rAF 空转的分析提交）。
+- [ ] 手动锁定档位后 governor 不再自动切档（只更新显示）。
+- [ ] 关闭 HUD 再打开 5 次，`performance.memory` 无持续增长（`destroy()` 覆盖 texture/buffer/downscaler）。
+
+**正确性（不因性能而让步的部分）**
+
+- [ ] `pnpm test` 全绿：`matrices` `primaries` `transfer` `quantize` `units` `locus` `range-detector` `reference` `signal-texture` `analysis-size` `graticule` `vectorscope-geometry` `cie-geometry` `plan` `raw-layout` `perf-governor`。
+- [ ] 测试台 `?range=limited`：波形 75% 白条落在 75 IRE ±0.5，黑位在 0 IRE（轴高 6.3%）而非贴底。
+- [ ] 同一素材切换 `units`（ire → code8 → code10 → mv → nits）后**波形几何完全不变**，只有标签变化。
+- [ ] Limited 与 Full 两版彩条的黑位高度肉眼可区分（6.3% vs 0%）。
+- [ ] 降采样后 8 条彩条仍全部分离（`strided-sampling.test.ts` 已锁住：stride 8 下 8 条不塌陷）。
+- [ ] Range 诊断：对「Limited 码值但标为 Full」的素材 3 帧后告警；对正常素材连续 10 秒不误报。
+- [ ] 全屏（YouTube `f`）后 HUD 仍在可视区。
+- [ ] README 写完 spec §8 的六条已知限制。
 
 ## 已知的取舍（写进 README）
 
-1. **默认观测显示参考信号。** `copyExternalImageToTexture` 拿到的是浏览器色彩管理之后的 RGB。对 SDR Rec.709 内容，range 展开已被 `blend()` 还原，观测有效；对 PQ/HLG 或非 Rec.709 原色，必须切 Raw Plane 模式才准。
-2. **nits 标尺假设 PQ。** 轴坐标被直接当 PQ 信号解读。SDR 内容切到 nits 只是换一组参考刻度，UI 会标注 `PQ assumed`。
-3. **Raw 模式不提供 RGB Parade。** 只有 Y/U/V 平面，没有逐通道 R/G/B；parade 会把 Y 复制到三栏并在标签上标注 `Y only`。
-4. **L3 tabCapture 的分辨率等于视频在页面上的显示尺寸**，不是源分辨率；range 只能靠统计推断，状态栏会显示 `heuristic`。
+1. **默认观测显示参考信号，且分析分辨率固定 640×360。** 对 SDR Rec.709 内容 range 展开可被精确还原，观测有效；对 PQ / HLG / 非 Rec.709 原色，需切 Raw Plane 模式。降采样不影响亮度/色度的统计正确性，只影响极细结构的锐度。
+2. **nits 标尺假设 PQ。** 轴坐标直接按 PQ 信号解读；对 SDR 内容只是换一组参考刻度，UI 标注 `PQ assumed`。
+3. **Raw 模式没有逐通道 RGB。** 只有 Y/U/V 平面，RGB Parade 会把 Y 复制到三栏并标注 `Y only`。
+4. **DRM 视频**取不到像素，插件显示不支持。
+5. **L3 捕获精度**：分辨率等于视频在页面上的显示尺寸；range 只能靠统计推断，状态栏标注 `heuristic`。
+6. **跨源无 CORS** 默认不可分析，需用户显式开启 L2 注入。
+7. **自适应降载会简化布局。** tier 3 起四宫格降为三联，tier 4 降为单格。这是刻意的：宁可少看一个示波器，也不要让视频卡。
