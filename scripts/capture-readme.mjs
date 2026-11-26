@@ -319,6 +319,30 @@ for (const [name, seed, pattern] of closeups) {
   await page.close();
 }
 
+// 7. A narrow 10-bit panel, which shows the code-value scales and the compact
+//    single-scope layout reading something other than IRE.
+{
+  const page = await boot({
+    viewport: { width: 1200, height: 860 },
+    pattern: 'cinematic',
+    state: state({
+      layout: 'single',
+      mode: 'waveform-rgb',
+      units: 'code10',
+      cells: { single: [cell('waveform-rgb', { units: 'code10', traceMode: 'colorize' })] },
+      panels: { single: ['waveform-rgb'] },
+    }),
+  });
+  await place(page, { width: 760, height: 460, right: 20, top: 20 });
+  const clip = await page.evaluate(() => {
+    const r = document.getElementById('video-scopes-host').getBoundingClientRect();
+    return { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) };
+  });
+  report.push({ name: 'ten-bit', clip });
+  shots.push(await shoot(page, 'ten-bit', clip));
+  await page.close();
+}
+
 await browser.close();
 server.close();
 

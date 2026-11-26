@@ -62,14 +62,29 @@ try {
   const m = await page.evaluate(async () => {
     const root = document.getElementById('video-scopes-host').shadowRoot;
     const cell = root.querySelector('.cell');
-    const grab = async (c) => {
-      const b = await createImageBitmap(c);
-      const oc = new OffscreenCanvas(b.width, b.height);
-      const x = oc.getContext('2d');
-      x.drawImage(b, 0, 0);
-      return { w: b.width, h: b.height, d: x.getImageData(0, 0, b.width, b.height).data };
+    // A WebGPU canvas only holds pixels once it has been presented, and
+    // createImageBitmap can win that race and read transparent black. Poll
+    // until the data layer is actually lit, the same way the other suites do.
+    const grab = async (c, requireLit = false) => {
+      let last = null;
+      for (let attempt = 0; attempt < (requireLit ? 40 : 1); attempt++) {
+        await new Promise((r) => requestAnimationFrame(r));
+        const b = await createImageBitmap(c);
+        const oc = new OffscreenCanvas(b.width, b.height);
+        const x = oc.getContext('2d');
+        x.drawImage(b, 0, 0);
+        const d = x.getImageData(0, 0, b.width, b.height).data;
+        last = { w: b.width, h: b.height, d };
+        if (!requireLit) break;
+        let any = 0;
+        for (let i = 3; i < d.length; i += 16) {
+          if (d[i] > 8) { any++; if (any > 10) break; }
+        }
+        if (any > 10) break;
+      }
+      return last;
     };
-    const a = await grab(cell.querySelector('canvas.gpu'));
+    const a = await grab(cell.querySelector('canvas.gpu'), true);
     const g = await grab(cell.querySelector('canvas.grat'));
 
     // Count data pixels and how much of the plot area they cover.
@@ -126,23 +141,45 @@ try {
       const mn = Math.min(g.d[i], g.d[i + 1], g.d[i + 2]);
       if (mx > 70 && mx - mn > 45) gratHue.push(i);
     }
+
+    // The sRGB triangle in canvas pixels, derived the same way cieFrame() places
+    // the plot: CIE_BOUNDS xy is 0.8 x 0.9, fitted with equal axis scale and
+    // centred. That is the region the assertion is about, so it is the right
+    // denominator -- the locus extent is the whole visible gamut, roughly twice
+    // as wide, and measuring against it understates the fill.
+    const BW = 0.8, BH = 0.9;
+    const scale = Math.min(a.w / BW, a.h / BH);
+    const left = (a.w - BW * scale) / 2;
+    const top = (a.h - BH * scale) / 2;
+    const toPx = ([cx, cy]) => [left + cx * scale, top + (BH - cy) * scale];
+    const tri = [[0.64, 0.33], [0.3, 0.6], [0.15, 0.06]].map(toPx);
+    const triXs = tri.map((t) => t[0]);
+    const triYs = tri.map((t) => t[1]);
+    const gamutBox = {
+      w: Math.max(...triXs) - Math.min(...triXs),
+      h: Math.max(...triYs) - Math.min(...triYs),
+    };
+
     return {
       w: a.w, h: a.h, lit, tints: tints.size,
       coverage: +(blocksInBox / (boxCols * boxRows)).toFixed(2),
       cloudBox: { w: maxX - minX, h: maxY - minY },
       plotBox: { w: gMaxX - gMinX, h: gMaxY - gMinY },
+      gamutBox,
       gratHuePx: gratHue.length,
     };
   });
 
-  // The cloud must span most of the sRGB triangle, since the fixture sweeps the
-  // whole sRGB hue range at fixed lightness. Rec.709 covers 0.49 x 0.27 units in
-  // xy; the cloud should fill most of that, and comparing against it is
-  // independent of panel size and of the letterbox margins.
-  const cloudFillsGamut = m.cloudBox.w > m.plotBox.w * 0.3 && m.cloudBox.h > m.plotBox.h * 0.4;
+  // The cloud must span the sRGB triangle, since the fixture sweeps the whole
+  // sRGB hue range at fixed lightness. Rec.709 spans 0.49 in x and 0.54 in y,
+  // so a correct plot fills most of that triangle; the thresholds sit below
+  // 1.0 to allow for the sweep stopping short of the extreme vertices.
+  const fillX = m.cloudBox.w / m.gamutBox.w;
+  const fillY = m.cloudBox.h / m.gamutBox.h;
+  const cloudFillsGamut = fillX > 0.6 && fillY > 0.6;
   check('the CIE cloud spans the sRGB gamut, not a few dots', cloudFillsGamut,
-    `cloud ${m.cloudBox.w}x${m.cloudBox.h} in plot ${m.plotBox.w}x${m.plotBox.h} ` +
-      `(${(m.coverage * 100).toFixed(0)}% of blocks, ${m.lit} px)`);
+    `cloud ${m.cloudBox.w}x${m.cloudBox.h} of gamut ${Math.round(m.gamutBox.w)}x${Math.round(m.gamutBox.h)} ` +
+      `(${(fillX * 100).toFixed(0)}% x, ${(fillY * 100).toFixed(0)}% y, ${m.lit} px)`);
   check('the cloud is genuinely multi-coloured', m.tints > 40, `${m.tints} distinct tints`);
   check('the locus is still visible underneath', m.gratHuePx > 5000, `${m.gratHuePx} hue px`);
   check('no errors', errors.length === 0, errors.slice(0, 2).join(' | ') || 'clean');
