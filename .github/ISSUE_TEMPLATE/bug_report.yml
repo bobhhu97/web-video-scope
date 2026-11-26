@@ -1,0 +1,72 @@
+name: Bug report
+description: Something renders wrong, crashes, or behaves unexpectedly
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The more reproducible the
+        report, the faster it can be fixed. Please do not report security
+        issues here — see [SECURITY.md](../../SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Steps, and if possible a page/video that triggers it.
+      placeholder: |
+        1. Open the extension on ...
+        2. Play a video with ...
+        3. Press Alt+S, switch to ...
+        4. See ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Extension version
+      description: From the Chrome extensions page, or the release tag.
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and OS
+      placeholder: "Chrome 137, macOS 15.4"
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Which scope is affected?
+      multiple: true
+      options:
+        - Waveform
+        - Vectorscope
+        - Histogram
+        - CIE chromaticity
+        - UI / layout
+        - Other / not sure
+    validations:
+      required: false
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: A shot of the scope and of the source video helps a lot.
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for a duplicate.
+          required: true

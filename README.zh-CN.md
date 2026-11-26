@@ -187,6 +187,10 @@ GPU 密度通道和它的 CPU 参考实现共用同一套索引约定；参考�
 
 全部在本地跑。不发网络请求、不上传遥测、任何帧都不落盘——像素在 GPU 内存里读、画、丢。设置存在 `chrome.storage.local`。详见 [docs/privacy-policy.md](docs/privacy-policy.md)。
 
+## 参与贡献
+
+欢迎贡献——代码、文档、bug 报告和测试素材都算。开发环境的搭法、PR 流程和项目的基本原则见 [CONTRIBUTING.md](CONTRIBUTING.md)。参与前请先读 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
+
 ## 开源、致谢与许可
 
 ### 本项目的许可

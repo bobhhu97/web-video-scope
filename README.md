@@ -254,6 +254,14 @@ written to disk — pixels are read in GPU memory, plotted, and discarded. Setti
 live in `chrome.storage.local`. See
 [docs/privacy-policy.md](docs/privacy-policy.md).
 
+## Contributing
+
+Contributions are welcome — code, docs, bug reports and test patterns alike. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for development setup, the pull-request
+workflow and the project's ground rules. Please read
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before participating. Security issues
+should be reported privately as described in [SECURITY.md](SECURITY.md).
+
 ## Open source, credits & licence
 
 ### This project's licence
