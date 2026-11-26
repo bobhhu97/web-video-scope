@@ -1,0 +1,61 @@
+---
+description: 常见改动的落地清单：新增示波器模式、标尺单位、HDR 分区、帧捕获路径、面板结构。
+alwaysApply: false
+---
+
+# 改动清单
+
+改之前先读 `.cursor/rules/architecture-invariants.mdc`（结构）与 `color-and-range.mdc`（色彩）。
+下面每项都要求：源码改完 → `pnpm build` → `pnpm test` → 对应的 `scripts/verify-*.mjs`。
+
+## 新增一种示波器模式
+
+1. `src/gpu/scope-renderer.ts`：`ScopeMode` 联合、`ACC_MODE`、`RES_MODE`、`accChannel()` 子模式编号
+2. `src/gpu/shaders/accumulate.wgsl`：新增 `accMode` 分支
+3. `src/gpu/shaders/resolve.wgsl`：新增**同号** `mode` 分支
+4. `src/ui/graticule.ts`：`drawGraticule()` 分派 + 新刻度函数
+5. `src/ui/settings.ts`：`panelsForLayout()` 默认布局、`supportsHdrZones()`、`defaultCellForMode()`
+6. `src/ui/hud.ts`：工具栏按钮 + 每 cell 的 ⚙ 弹窗里的模式下拉
+7. `src/ui/i18n.ts`：EN 与 ZH **两套**字符串（缺一条会让中文界面掉英文）
+8. 单测 + 一条浏览器像素断言
+
+## 新增/修改标尺单位
+
+`src/core/scale/units.ts`：`Unit` 联合、`axisToUnit` / `unitToAxis` / `unitSuffix` /
+`resolveEffectiveUnit` / `resolveHdrZoneThresholds` → `src/ui/graticule.ts` 的刻度数组 →
+`src/ui/settings.ts` 默认值 → `hud.ts` 下拉 → `i18n.ts`。
+
+**必须**验证"切单位后 trace 几何完全不变"（`tests/units.test.ts` 已有这个断言，照着扩）。
+
+## 修改 HDR 分区
+
+`core/scale/units.ts` 的 `resolveHdrZoneThresholds` → `resolve.wgsl` 的 `hdrZoneColorFromAxis`
+→ `false-color-overlay.ts` 的 `legendItems` → `graticule.ts` 色带 →
+`tests/hdr-multi-zone-coloring.test.ts`。三处颜色必须一致，否则图例与画面不符。
+
+## 修改帧捕获路径
+
+`src/content/scope-controller.ts` 的 `frame()` / `encodeDisplayDownscale()` / `encodeRawDownscale()`。
+
+- `importExternalTexture` 失败一次后 `externalFailed` **永久置位**，整页退回拷贝路径，
+  直到 `buildController()` 重建（只有启动与迁窗口会调用，切布局不会）。这是刻意行为，
+  但要记得它会持续影响性能。
+- raw 模式只有 Y/U/V 平面：RGB Parade 会把 Y 复制三栏并标注 `Y only`，不要假装有逐通道 RGB。
+- 硬件解码的不透明帧 `frame.format === null` 必须抛错并提示切回 display，**不要**静默画空图。
+- 不要在显示路径上为了"验证画面"引入每帧 `await` 像素回读，会打乱提交节奏。
+
+## 修改面板 DOM / 样式
+
+`src/ui/hud.ts`（`STYLE` 常量 → `template()` → `wire()` → `syncInputs()`），
+然后**立刻**跑 `node scripts/verify-layout.mjs`（@2x 量溢出与刻度）。
+Shadow DOM 与 Top Layer 的禁忌见 `hud-and-dom.mdc`。
+
+## 补 tabCapture 兜底（已知半成品）
+
+现状：`service-worker.ts` 已有 `getMediaStreamId` + 状态机，`src/shared/tab-capture.ts` 已有
+`consumeTabStream()` / `createFrameReader()`，但 **content script 从不发 `CAPTURE_START`**，
+也没有 offscreen 文档。要补的链路：
+
+HUD 显式入口 → 发 `capture:start` → 拿到 `streamId` → `consumeTabStream(streamId, video)`
+→ `MediaStreamTrackProcessor` 逐帧喂给 `ScopeController` → 结束时发 `capture:stop`。
+此时 range 只能标 `heuristic`，UI 必须如实说明（分辨率=显示尺寸，非源分辨率）。

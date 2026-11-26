@@ -81,8 +81,10 @@ function graticuleCacheKey(w: number, h: number, dpr: number, o: ScopeOptions, g
     o.primaries,
     o.coord,
     o.barTargets ?? 0.75,
+    o.vecScale2x ? 1 : 0,
     o.showSkinLine !== false ? 1 : 0,
     o.toneFilter ?? 'all',
+    o.sdrWhiteNits ?? 203,
     o.nitLow ?? 100,
     o.nitHigh ?? 1000,
     (o.graticuleBrightness ?? 1).toFixed(2),
@@ -305,7 +307,7 @@ export class ScopeController {
       }
       this.lastAnalysisAt = now;
 
-      const wantStats = (force && this.lastStatsAt === 0) || (!force && now - this.lastStatsAt >= 300);
+      const wantStats = this.lastStatsAt === 0 || now - this.lastStatsAt >= 300;
       if (wantStats) this.lastStatsAt = now;
 
       let firstRenderer: ScopeRenderer | null = null;

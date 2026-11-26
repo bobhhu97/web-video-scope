@@ -231,15 +231,25 @@ try {
     ).map((o) => o.value);
     cieCell.querySelector('.cell-gear').click(); // close
 
-    // Click Zone Color All -> Wave/Parade should get Nit active, Vector/CIE must NOT
+    // Click Zone Color All -> Wave/Parade should get hdr-zones in traceMode, Vector/CIE must NOT
     root.getElementById('zone-all-btn').click();
-    const waveNitOn = !!root.querySelector('.cell[data-slot="0"] .pill.nit-on');
-    const vecNitOn = !!root.querySelector('.cell[data-mode="vectorscope"] .pill.nit-on');
-    const cieNitOn = !!root.querySelector('.cell[data-mode="cie"] .pill.nit-on');
+    waveCell.querySelector('.cell-gear').click();
+    const waveNitOn = waveCell.querySelector('select[data-pop="traceMode"]').value === 'hdr-zones';
+    waveCell.querySelector('.cell-gear').click();
+
+    vecCell.querySelector('.cell-gear').click();
+    const vecNitOn = vecCell.querySelector('select[data-pop="traceMode"]').value === 'hdr-zones';
+    vecCell.querySelector('.cell-gear').click();
+
+    cieCell.querySelector('.cell-gear').click();
+    const cieNitOn = cieCell.querySelector('select[data-pop="traceMode"]').value === 'hdr-zones';
+    cieCell.querySelector('.cell-gear').click();
+
     // Toggle Zone Color All back off
     root.getElementById('zone-all-btn').click();
 
     return {
+      wavePills: pillsText(waveCell),
       vecPills: pillsText(vecCell),
       ciePills: pillsText(cieCell),
       vecTraceOpts,
@@ -251,11 +261,12 @@ try {
   });
 
   check(
-    'Vectorscope & CIE have NO Nit button; Vectorscope has direct 2× button',
-    !pillAudit.vecPills.includes('Nit') &&
-      !pillAudit.ciePills.includes('Nit') &&
+    'Cell header bars show only signal/target/gamut pills (no inline Clr/B&W/Nit/Grn coloring pills)',
+    !pillAudit.wavePills.some((p) => ['Clr', 'B&W', 'Nit', 'Grn'].includes(p)) &&
+      !pillAudit.vecPills.some((p) => ['Clr', 'B&W', 'Nit', 'Grn'].includes(p)) &&
+      !pillAudit.ciePills.some((p) => ['Clr', 'B&W', 'Nit', 'Grn'].includes(p)) &&
       pillAudit.vecPills.includes('2×'),
-    `vec=[${pillAudit.vecPills.join(',')}] cie=[${pillAudit.ciePills.join(',')}]`,
+    `wave=[${pillAudit.wavePills.join(',')}] vec=[${pillAudit.vecPills.join(',')}] cie=[${pillAudit.ciePills.join(',')}]`,
   );
   check(
     'Vectorscope & CIE popovers exclude redundant HDR-Zones / Channel-Colors options',
@@ -270,7 +281,7 @@ try {
   );
 
   // =========================================================================
-  // 2. Vectorscope 2× pill & Popover 1× / 2× / 4× buttons + clean graticule
+  // 2. Vectorscope 2× Signal Trace Magnification & Popover 1× / 2× / 4× View Zoom
   // =========================================================================
   const vecZoomAudit = await page.evaluate(() => {
     const root = document.getElementById('video-scopes-host').shadowRoot;
@@ -279,11 +290,10 @@ try {
     const afterPillClick = {
       pillOn: vecCell.querySelector('button[data-act="zoom2x"]').classList.contains('on'),
       badgeHidden: vecCell.querySelector('.zoom-reset').hidden,
-      badgeText: vecCell.querySelector('.zoom-reset').textContent.trim(),
     };
-    // Click 2× pill again -> toggles back to 1×
+    // Click 2× pill again -> toggles signal magnification back to 1×
     vecCell.querySelector('button[data-act="zoom2x"]').click();
-    const afterToggleBack = vecCell.querySelector('.zoom-reset').hidden;
+    const afterToggleBack = !vecCell.querySelector('button[data-act="zoom2x"]').classList.contains('on');
 
     // Open ⚙ popover and test 1× / 2× / 4× view buttons
     vecCell.querySelector('.cell-gear').click();
@@ -303,12 +313,11 @@ try {
   });
 
   check(
-    'Vectorscope 2× pill toggles cleanly between 1× and 2× view',
+    'Vectorscope 2× pill toggles 2× signal magnification without zooming the graticule view',
     vecZoomAudit.afterPillClick.pillOn &&
-      !vecZoomAudit.afterPillClick.badgeHidden &&
-      vecZoomAudit.afterPillClick.badgeText.startsWith('2×') &&
+      vecZoomAudit.afterPillClick.badgeHidden &&
       vecZoomAudit.afterToggleBack,
-    `badge="${vecZoomAudit.afterPillClick.badgeText}"`,
+    JSON.stringify(vecZoomAudit.afterPillClick),
   );
   check(
     'Cell ⚙ popover 1× / 2× / 4× view buttons switch zoom interactively',

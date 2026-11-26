@@ -63,20 +63,54 @@ export function unitToAxis(value: number, unit: Unit, spec: RangeSpec): number {
   }
 }
 
+export interface HdrZoneThresholds {
+  nitLow: number;
+  /** Intermediate SDR Reference White boundary when distinct (`nitLow + 8 < sdrWhite < nitHigh - 15`), else `null` (3-zone mode). */
+  nitRef: number | null;
+  nitHigh: number;
+  zoneCount: 3 | 4;
+}
+
+/**
+ * Resolve 3-zone or 4-zone HDR Nit boundaries:
+ * - 4 zones when `sdrWhiteNits` sits distinctly between `nitLow` and `nitHigh`
+ *   (e.g. `<100n` Blue/Cyan · `100–203n` Green · `203–1000n` Yellow · `>1000n` Red).
+ * - 3 zones when `nitLow` coincides with or exceeds `sdrWhiteNits`
+ *   (e.g. `203/1k` preset: `≤203n` Green · `203–1000n` Yellow · `>1000n` Red).
+ */
+export function resolveHdrZoneThresholds(
+  rawLow = 100,
+  rawHigh = 1000,
+  rawSdrWhite = SDR_DIFFUSE_WHITE_NITS,
+): HdrZoneThresholds {
+  const nitLow = Math.max(0.01, rawLow);
+  const nitHigh = Math.max(nitLow + 1, rawHigh);
+  const sdrWhite = Math.max(50, rawSdrWhite || SDR_DIFFUSE_WHITE_NITS);
+  const hasRefSplit = sdrWhite > nitLow + 8 && sdrWhite < nitHigh - 15;
+  return {
+    nitLow,
+    nitRef: hasRefSplit ? sdrWhite : null,
+    nitHigh,
+    zoneCount: hasRefSplit ? 4 : 3,
+  };
+}
+
 /**
  * Convert a luminance threshold in cd/m² (nits) onto the active [0, 1] code axis
- * so dual-Nit reference lines and zone boundaries match the active EOTF.
+ * so HDR Nit reference lines and zone boundaries match the active EOTF.
  */
 export function nitsToAxisForTransfer(
   nits: number,
   transfer: EffectiveTransfer,
   spec: RangeSpec,
+  sdrWhiteNits = SDR_DIFFUSE_WHITE_NITS,
 ): number {
   if (transfer === 'pq') return nitsToPq(Math.max(0, nits));
   if (transfer === 'hlg') return nitsToHlg(Math.max(0, nits), 1000);
-  // In SDR mode, treat SDR diffuse white (203 nits, or 100 nits) smoothly onto 0..100 IRE:
-  // 0..203 nits maps linearly in light onto 0..100 IRE so testing Nit zones on SDR is intuitive.
-  const normLinear = Math.min(1, Math.max(0, nits / SDR_DIFFUSE_WHITE_NITS));
+  // In SDR mode, map [0..sdrWhiteNits] onto [0..100 IRE]; superwhites (>sdrWhiteNits in limited range)
+  // extend above legal white up to axis 1.0 instead of collapsing onto 100 IRE.
+  const sdrWhite = Math.max(50, sdrWhiteNits || SDR_DIFFUSE_WHITE_NITS);
+  const normLinear = Math.max(0, nits / sdrWhite);
   const srgb = normLinear <= 0.0031308 ? normLinear * 12.92 : 1.055 * Math.pow(normLinear, 1 / 2.4) - 0.055;
   const { black, white } = legalAxisBounds(spec);
   return Math.min(1, Math.max(0, black + srgb * (white - black)));
@@ -86,12 +120,14 @@ export function axisToNitsForTransfer(
   axis: number,
   transfer: EffectiveTransfer,
   spec: RangeSpec,
+  sdrWhiteNits = SDR_DIFFUSE_WHITE_NITS,
 ): number {
   if (transfer === 'pq') return pqToNits(axis);
   if (transfer === 'hlg') return hlgToNits(axis, 1000);
+  const sdrWhite = Math.max(50, sdrWhiteNits || SDR_DIFFUSE_WHITE_NITS);
   const { black, white } = legalAxisBounds(spec);
   const norm = Math.max(0, (axis - black) / Math.max(1e-5, white - black));
-  return srgbToLinear(norm) * SDR_DIFFUSE_WHITE_NITS;
+  return srgbToLinear(norm) * sdrWhite;
 }
 
 export function tickValues(unit: Unit, spec: RangeSpec, zoom = 1): number[] {

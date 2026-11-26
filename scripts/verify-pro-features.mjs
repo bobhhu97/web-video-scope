@@ -265,10 +265,12 @@ try {
       el.dispatchEvent(new Event('change', { bubbles: true }));
     };
 
-    // Slot 0: Waveform -> Y + Monochrome (B&W)
+    // Slot 0: Waveform -> Y + Monochrome (B&W) via cell ⚙ Settings popover
     const cell0 = root.querySelector('.cell[data-slot="0"]');
     cell0.querySelector('.pill[data-wave="Y"]').click();
-    cell0.querySelector('.pill[data-act="mono"]').click();
+    cell0.querySelector('.cell-gear').click();
+    setSelect(cell0.querySelector('select[data-pop="traceMode"]'), 'monochrome');
+    cell0.querySelector('.cell-gear').click();
 
     // Slot 1: Parade -> YUV mode
     const cell1 = root.querySelector('.cell[data-slot="1"]');

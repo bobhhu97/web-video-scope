@@ -174,12 +174,14 @@ function optionsForSlot(slot: number, fallbackMode: ScopeMode): ScopeOptions {
     matrix,
     sourceMatrix,
     barTargets: cell?.barTargets ?? state.barTargets ?? 0.75,
+    vecScale2x: cell?.vecScale2x ?? false,
     primaries,
     gamuts,
     coord: cell?.coord ?? state.coord,
     signalKind: state.signalMode,
     sourceTransfer,
     effectiveTransfer,
+    sdrWhiteNits: state.sdrWhiteNits ?? 203,
     nitLow: state.nitLow ?? 100,
     nitHigh: state.nitHigh ?? 1000,
     graticuleBrightness: state.graticuleBrightness ?? 1,
@@ -201,7 +203,11 @@ function falseColorConfig(): FalseColorConfig {
     signalKind: state.signalMode,
     sourceTransfer: currentSourceTransfer(),
     effectiveTransfer: currentEffectiveTransfer(),
-    displayTransferFix: resolveDisplayTransferFix(colorInfo.transfer),
+    displayTransferFix: resolveDisplayTransferFix(
+      colorInfo.transfer,
+      undefined,
+      colorInfo.primaries,
+    ),
   };
 }
 
@@ -313,7 +319,11 @@ function syncVideoColorSpace(video: HTMLVideoElement): void {
     info.transfer !== colorInfo.transfer
   ) {
     colorInfo = info;
+    controller?.invalidateStats();
     refreshHud();
+    if (video.paused) {
+      void controller?.frame(video, true).catch(() => {});
+    }
   }
 }
 
@@ -543,6 +553,7 @@ function buildHandlers(): HudHandlers {
       const probeCfgChanged = patch.probeConfig !== undefined || patch.lang !== undefined;
       const hdrChanged =
         patch.hdrMode !== undefined ||
+        patch.sdrWhiteNits !== undefined ||
         patch.nitLow !== undefined ||
         patch.nitHigh !== undefined ||
         patch.matrixMode !== undefined ||

@@ -64,6 +64,8 @@ export interface I18nStrings {
   popTones: string;
   popOverlay: string;
   skinLine: string;
+  vecSignal2x: string;
+  vecSignal2xTitle: string;
   popChart: string;
   popGamuts: string;
   popColoring: string;
@@ -90,6 +92,8 @@ export interface I18nStrings {
   lblLanguage: string;
   lblPanelOpacity: string;
   lblGratBright: string;
+  lblTraceColoring: string;
+  traceDefault: string;
   secColorSpace: string;
   lblPrimaries: string;
   lblTransfer: string;
@@ -171,7 +175,7 @@ const EN: I18nStrings = {
   fcPresetArri: 'ARRI Classic Exposure (6-Band)',
   fcPresetSmallHd: 'SmallHD PageOS Multi-Zone',
   fcPresetSpectrum: 'IRE Continuous Spectrum',
-  fcPresetHdr: 'HDR Dual-Nit Zones',
+  fcPresetHdr: 'HDR Multi-Zone Nits',
 
   signalHdrSection: 'Signal & HDR Nit Zones',
   wheelZoomHint: 'Wheel=Zoom · Drag=Pan',
@@ -179,7 +183,7 @@ const EN: I18nStrings = {
   lowNit: 'Low',
   peakNit: 'Peak',
   zoneColorAll: 'Zone Color All',
-  zoneColorAllTitle: 'Toggle HDR Nit Zone coloring across luminance/code scopes',
+  zoneColorAllTitle: 'Toggle 3–4 zone HDR Nit coloring across luminance/code scopes',
 
   popScope: 'Scope',
   popChannels: 'Channels',
@@ -190,6 +194,8 @@ const EN: I18nStrings = {
   popTones: 'Tones',
   popOverlay: 'Overlay',
   skinLine: 'Skin I-Line',
+  vecSignal2x: '2× Trace',
+  vecSignal2xTitle: 'Magnify Vectorscope signal waveform by 2× (keeps graticule at 1×)',
   popChart: 'Chart',
   popGamuts: 'Gamuts',
   popColoring: 'Coloring',
@@ -207,7 +213,7 @@ const EN: I18nStrings = {
   traceChannel: 'Channel Colors',
   traceColorize: 'Colorize (Source RGB)',
   traceMono: 'Monochrome (B&W)',
-  traceHdrZones: 'HDR Dual-Nit Zones',
+  traceHdrZones: 'HDR Nit Zones',
   traceGreen: 'Classic Green CRT',
 
   settingsTitle: 'Global Preferences & Color Pipeline',
@@ -215,6 +221,8 @@ const EN: I18nStrings = {
   lblLanguage: 'Language',
   lblPanelOpacity: 'Panel Opacity',
   lblGratBright: 'Graticule Dim',
+  lblTraceColoring: 'Scope Coloring',
+  traceDefault: 'Standard (Channel / Color)',
   secColorSpace: 'Source Color Space Override',
   lblPrimaries: 'Primaries',
   lblTransfer: 'Transfer (EOTF)',
@@ -293,7 +301,7 @@ const ZH: I18nStrings = {
   fcPresetArri: 'ARRI 经典六段曝光伪色',
   fcPresetSmallHd: 'SmallHD PageOS 曝光伪色',
   fcPresetSpectrum: 'IRE 连续彩虹光谱伪色',
-  fcPresetHdr: 'HDR 双 Nit 分区伪色',
+  fcPresetHdr: 'HDR 多区 Nit 伪色',
 
   signalHdrSection: '信号与 HDR Nit 分区设置',
   wheelZoomHint: '滚轮=缩放 · 拖拽=平移',
@@ -301,7 +309,7 @@ const ZH: I18nStrings = {
   lowNit: '暗部',
   peakNit: '峰值',
   zoneColorAll: '全波形 Nit 着色',
-  zoneColorAllTitle: '为所有波形/分量/直方图切换 HDR 双 Nit 分区着色',
+  zoneColorAllTitle: '为所有波形/分量/直方图切换 HDR 三/四区 Nit 着色',
 
   popScope: '示波器',
   popChannels: '通道',
@@ -312,6 +320,8 @@ const ZH: I18nStrings = {
   popTones: '色调过滤',
   popOverlay: '辅助线',
   skinLine: '肤色线 (I-Line)',
+  vecSignal2x: '波形 2×',
+  vecSignal2xTitle: '仅将矢量波形信号放大 2 倍便于观察，外圈刻度保持不变',
   popChart: '坐标系',
   popGamuts: '色域框',
   popColoring: '着色模式',
@@ -329,7 +339,7 @@ const ZH: I18nStrings = {
   traceChannel: '通道标准色',
   traceColorize: '源画面真彩色 (Colorize)',
   traceMono: '黑白无着色 (B&W)',
-  traceHdrZones: 'HDR 双 Nit 分区色',
+  traceHdrZones: 'HDR 多区 Nit 着色',
   traceGreen: '经典绿荧光 (CRT)',
 
   settingsTitle: '全局设置与色彩空间配置',
@@ -337,6 +347,8 @@ const ZH: I18nStrings = {
   lblLanguage: '界面语言',
   lblPanelOpacity: '面板透明度',
   lblGratBright: '刻度亮度',
+  lblTraceColoring: '示波器着色',
+  traceDefault: '标准配色 (通道色 / 真彩色)',
   secColorSpace: '当前画面色彩空间指定',
   lblPrimaries: '画面色域',
   lblTransfer: '转换曲线',

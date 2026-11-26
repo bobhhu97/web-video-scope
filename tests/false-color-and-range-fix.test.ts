@@ -459,11 +459,13 @@ describe('Bilibili real-world False Color fixes (CSS !important isolation, popov
     const winSrgbG = linearToSrgb(ituLin(103 / 255));
     expect(recoverBt709SignalFromSrgb(winSrgbG, 2)).toBeCloseTo(103 / 255, 4);
 
-    // 3. sRGB / PQ / HLG / unknown stay pass-through (mode 0)
+    // 3. sRGB / unknown stay pass-through (mode 0); HDR PQ/HLG select Dawn inverse-gamut mode (3/4/5)
     expect(resolveDisplayTransferFix('srgb', 'MacIntel')).toBe(0);
-    expect(resolveDisplayTransferFix('pq', 'MacIntel')).toBe(0);
-    expect(resolveDisplayTransferFix('hlg', 'MacIntel')).toBe(0);
     expect(resolveDisplayTransferFix('unknown', 'MacIntel')).toBe(0);
+    expect(resolveDisplayTransferFix('pq', 'MacIntel')).toBe(3);
+    expect(resolveDisplayTransferFix('hlg', 'MacIntel')).toBe(3);
+    expect(resolveDisplayTransferFix('pq', 'MacIntel', 'p3')).toBe(4);
+    expect(resolveDisplayTransferFix('pq', 'MacIntel', 'rec709')).toBe(5);
 
     // 4. false-color.wgsl uses pure Luma `ireNorm = y;` (no max(r,g,b)*0.992 distortion on warm/skin tones)
     expect(falseColorWgsl).toContain('ireNorm = y;');

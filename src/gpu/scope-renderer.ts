@@ -3,7 +3,12 @@ import { LUMA, type MatrixId } from '../core/color/matrices';
 import { PRIMARIES, type PrimariesId } from '../core/color/primaries';
 import { vectorscopeFrame } from '../core/color/vectorscope-frame';
 import { axisMapping, type RangeSpec } from '../core/scale/quantize';
-import { nitsToAxisForTransfer, type EffectiveTransfer, type Unit } from '../core/scale/units';
+import {
+  nitsToAxisForTransfer,
+  resolveHdrZoneThresholds,
+  type EffectiveTransfer,
+  type Unit,
+} from '../core/scale/units';
 import type { CanvasGpu } from './device';
 import type { AnalysisTexture } from './downscale';
 import { WAVE_PAD } from '../ui/graticule';
@@ -48,12 +53,15 @@ export interface ScopeOptions {
   sourceMatrix?: MatrixId;
   /** Vectorscope primary target box level (0.75 for SMPTE HD, 1 for 100% EBU/full-field bars). */
   barTargets?: 0.75 | 1;
+  /** Magnify Vectorscope signal scatter by 2× around center without zooming graticule/view. */
+  vecScale2x?: boolean;
   primaries: PrimariesId;
   gamuts?: PrimariesId[];
   coord: 'xy' | 'uv';
   signalKind: 'display' | 'raw';
   sourceTransfer?: EffectiveTransfer;
   effectiveTransfer?: EffectiveTransfer;
+  sdrWhiteNits?: number;
   nitLow?: number;
   nitHigh?: number;
   graticuleBrightness?: number;
@@ -81,12 +89,14 @@ export const DEFAULT_SCOPE_OPTIONS: ScopeOptions = {
   range: { limited: true, depth: 8 },
   matrix: 'bt709',
   barTargets: 0.75,
+  vecScale2x: false,
   primaries: 'rec709',
   gamuts: ['rec709', 'p3'],
   coord: 'xy',
   signalKind: 'display',
   sourceTransfer: 'sdr',
   effectiveTransfer: 'sdr',
+  sdrWhiteNits: 203,
   nitLow: 100,
   nitHigh: 1000,
   dpr: 1,
@@ -189,7 +199,7 @@ function planesForOptions(o: ScopeOptions): number {
   if (o.mode === 'histogram') return 4;
   const tm = traceModeCode(o);
   if (o.mode === 'vectorscope' || o.mode === 'cie') {
-    return tm === 3 ? 4 : 1;
+    return tm === 3 ? 5 : 1;
   }
   if (o.mode === 'waveform-parade') {
     return tm === 2 ? 4 : 1;
@@ -406,8 +416,10 @@ export class ScopeRenderer {
     const maxNormPan = Math.max(0, 1 - 1 / zoom);
     const normPanX = Math.min(maxNormPan, Math.max(0, o.panX ?? 0));
     const normPanY = Math.min(maxNormPan, Math.max(0, o.panY ?? 0));
-    const nitLow = Math.max(0.01, o.nitLow ?? 100);
-    const nitHigh = Math.max(nitLow + 1, o.nitHigh ?? 1000);
+    const sdrWhiteNits = Math.max(50, o.sdrWhiteNits ?? 203);
+    const zones = resolveHdrZoneThresholds(o.nitLow ?? 100, o.nitHigh ?? 1000, sdrWhiteNits);
+    const nitLow = zones.nitLow;
+    const nitHigh = zones.nitHigh;
 
     let frameAx = 0;
     let frameAy = 0;
@@ -419,12 +431,13 @@ export class ScopeRenderer {
 
     if (o.mode === 'vectorscope') {
       const vf = vectorscopeFrame(plot.w, plot.h, zoom, o.panX ?? 0, o.panY ?? 0);
+      const sigGain = o.vecScale2x ? 2 : 1;
       frameAx = vf.cx;
       frameAy = vf.cy;
       frameAz = vf.discCx;
       frameAw = vf.discCy;
-      frameBx = vf.radius;
-      frameBy = vf.scale;
+      frameBx = vf.radius * zoom;
+      frameBy = vf.scale * sigGain;
     } else if (o.mode === 'cie') {
       // panX/panY in CIE are in chromaticity units (scale-invariant across DPR)
       const cfExact = cieViewportFrame(plot.w, plot.h, o.coord, zoom, o.panX, o.panY, o.dpr);
@@ -453,7 +466,7 @@ export class ScopeRenderer {
     u32.set([analysis.width, analysis.height, densW, plot.h], 0);
     u32.set([accMode, subMode, traceMode, flags], 4);
     f32.set([c.kr, c.kg, c.kb, zoom], 8);
-    f32.set([sc.kr, sc.kg, sc.kb, 0], 12);
+    f32.set([sc.kr, sc.kg, sc.kb, sdrWhiteNits], 12);
     f32.set([m[0]![0], m[0]![1], m[0]![2], 0], 16);
     f32.set([m[1]![0], m[1]![1], m[1]![2], 0], 20);
     f32.set([m[2]![0], m[2]![1], m[2]![2], 0], 24);
@@ -464,8 +477,10 @@ export class ScopeRenderer {
     device.queue.writeBuffer(this.paramsBuffer, 0, this.paramsScratch);
 
     const effTransfer = o.effectiveTransfer ?? 'sdr';
-    const axisNitLow = nitsToAxisForTransfer(nitLow, effTransfer, o.range);
-    const axisNitHigh = nitsToAxisForTransfer(nitHigh, effTransfer, o.range);
+    const axisNitLow = nitsToAxisForTransfer(nitLow, effTransfer, o.range, sdrWhiteNits);
+    const axisNitMid =
+      zones.nitRef !== null ? nitsToAxisForTransfer(zones.nitRef, effTransfer, o.range, sdrWhiteNits) : -1;
+    const axisNitHigh = nitsToAxisForTransfer(nitHigh, effTransfer, o.range, sdrWhiteNits);
 
     const ru = this.resolveU32;
     const rf = this.resolveF32;
@@ -473,7 +488,7 @@ export class ScopeRenderer {
     ru.set([plot.padL, plot.padT, plot.w, plot.h], 4);
     ru.set([subMode, traceMode, effTr, o.coord === 'uv' ? 1 : 0], 8);
     rf.set([o.gain, o.gamma, zoom, analysis.width * analysis.height], 12);
-    rf.set([c.kr, c.kg, c.kb, map.black], 16);
+    rf.set([c.kr, c.kg, c.kb, axisNitMid], 16);
     rf.set([normPanX, normPanY, axisNitLow, axisNitHigh], 20);
     rf.set([frameAx, frameAy, frameAz, frameAw], 24);
     rf.set([frameBx, frameBy, frameBz, densW], 28);

@@ -1,5 +1,7 @@
 # Web Video Scope
 
+> **简体中文** → [README.zh-CN.md](README.zh-CN.md) · English (this file)
+
 **Broadcast-grade video scopes, overlaid on any video on the web.**
 
 A Manifest V3 Chrome extension. Press `Alt+S` and a floating panel overlays a
@@ -9,11 +11,26 @@ clip, a canvas `captureStream`. It reads the video's real colour metadata and
 draws the trace in code-value space, so legal black sits where a hardware
 scope would put it.
 
-![Web Video Scope over a video, with the four-panel layout open](docs/screenshots/readme-hero.png)
+![Rick Astley's "Never Gonna Give You Up" on YouTube with SmallHD false colour and the four-scope quad layout open](docs/screenshots/readme-hero.png)
 
 ```
-pnpm install && pnpm build   →   chrome://extensions → Developer mode → Load unpacked → dist/
+Download web-video-scope-*.zip from Releases → unzip →
+chrome://extensions → Developer mode → Load unpacked → unzipped folder → Alt+S
 ```
+
+---
+
+## Contents
+
+- [What it measures](#what-it-measures) — the five scopes and how to read them
+- [How it reads the signal](#how-it-reads-the-signal) — one code-value axis, range detection, false colour
+- [Performance](#performance) — zero-copy upload, fixed analysis size, adaptive governor
+- [Install & use](#install)
+- [Development & verification](#development)
+- [Architecture](#architecture)
+- [Known limitations & privacy](#known-limitations)
+- [Open source, credits & licence](#open-source-credits--licence)
+- [Prior art](#prior-art)
 
 ---
 
@@ -27,16 +44,18 @@ pnpm install && pnpm build   →   chrome://extensions → Developer mode → Lo
 | **CIE 1931 / 1976** | Where the picture's colours sit inside the visible gamut, with Rec.709 / P3 / Rec.2020 triangles overlaid. |
 | **Histogram** | Where the pixels pile up across the range, per channel or combined. |
 
-<p align="center">
-  <img src="docs/screenshots/readme-waveform.png" width="49%" alt="Luma waveform reading a real scene: the trace spans the graded range, with the 100 IRE line where it should be">
-  <img src="docs/screenshots/readme-vectorscope.png" width="49%" alt="Vectorscope over a hue sweep: the point cloud fills the plot, with the skin-tone line and 75% targets drawn in">
-</p>
-<p align="center">
-  <img src="docs/screenshots/readme-parade.png" width="49%" alt="RGB parade on 75% colour bars: each bar lands on its own level in all three channels">
-  <img src="docs/screenshots/readme-cie.png" width="49%" alt="CIE 1931 xy diagram over a hue and saturation sweep, with Rec.709, P3 and Rec.2020 triangles">
-</p>
+Each panel has its own picker, zoom and settings; drag panels to swap slots, or
+switch between 1-up / 2-up / 3-up / four-grid layouts from the toolbar.
 
-## Five scales, one axis
+All five scopes, side by side, reading real test footage — waveform on a
+continuous-tone scene, parade on 75% colour bars, vectorscope and CIE on a
+hue × saturation sweep, and a YRGB histogram:
+
+![Waveform, parade, vectorscope, CIE diagram and histogram shown side by side](docs/screenshots/readme-scopes-all.png)
+
+## How it reads the signal
+
+### Five scales, one axis
 
 `IRE`, `8-bit`, `10-bit`, `mV` and `nits` are five sets of labels on **one
 underlying code-value axis**, so changing the scale never moves the trace — only
@@ -47,11 +66,9 @@ drawn where it actually lives: legal black at code 64, legal white at 940, with
 the sub-black and super-white headroom still visible on either side. Nothing is
 stretched to fill the box.
 
-<p align="center">
-  <img src="docs/screenshots/readme-ten-bit.png" width="88%" alt="Waveform on a 10-bit code-value scale, with legal black at 64 and legal white at 940 marked">
-</p>
+![Waveform on a 10-bit code-value scale, with legal black at 64 and legal white at 940 marked](docs/screenshots/readme-ten-bit.png)
 
-## It reads the range instead of guessing it
+### It reads the range instead of guessing it
 
 `new VideoFrame(video).colorSpace` exposes `fullRange`, `matrix`, `primaries`
 and `transfer` for the decoded frame. The status badge reports what was found:
@@ -65,13 +82,15 @@ full, or the reverse — a percentile heuristic over the frame's luma raises a
 warning after 3 consecutive frames. The `range` selector overrides the verdict
 by hand.
 
-## False colour on the picture itself
+### False colour on the picture itself
 
-ARRI, SmallHD, spectrum and HDR nit-zone ramps, drawn as an overlay on the video
-rather than in a separate scope, so exposure problems show up where you are
-actually looking.
+ARRI, SmallHD and spectrum ramps, drawn as an overlay on the video rather than
+in a separate scope, so exposure problems show up where you are actually
+looking. The strip below wipes the **same frame** (Rick Astley at 36 s from the
+video above) through all three presets, so the only thing changing is the
+false-colour mapping:
 
-![False colour exposure overlay on the video, with the ARRI legend and two scopes](docs/screenshots/readme-false-color.png)
+![One Rick Astley frame shown three ways as a wipe: ARRI, SmallHD and spectrum false colour](docs/screenshots/readme-false-color-wipe.png)
 
 ---
 
@@ -116,16 +135,29 @@ already Metal work.
 
 ## Install
 
+### Easiest: download a pre-built release
+
+Grab the latest `web-video-scope-<version>.zip` from the
+[Releases page](https://github.com/bobhhu97/web-video-scope/releases), unzip it,
+then in Chrome:
+
+1. `chrome://extensions` → enable **Developer mode**
+2. **Load unpacked** → select the unzipped folder (the one containing `manifest.json`)
+3. Open any page with a video and press **Alt+S**
+
+No `pnpm`, Node, or build step needed — the ZIP is the complete extension.
+It is not on the Chrome Web Store, so Chrome will show a developer-mode
+extension warning; that is expected for an unpacked load.
+
+### Build from source
+
 ```bash
 pnpm install
 pnpm build          # writes dist/
+pnpm package        # writes release/web-video-scope-<version>.zip
 ```
 
-Then in Chrome:
-
-1. `chrome://extensions` → enable **Developer mode**
-2. **Load unpacked** → select `dist/`
-3. Open any page with a video and press **Alt+S**
+Then load `dist/` in Chrome exactly as in steps 1–3 above.
 
 Drag the header to move the panel, drag the bottom-right corner to resize, or
 use `⧉` to detach it into an always-on-top window for a second monitor. Layout,
@@ -139,7 +171,7 @@ working in fullscreen.
 ## Development
 
 ```bash
-pnpm test              # unit tests (vitest) — 276 tests
+pnpm test              # unit tests (vitest) — 290 tests
 pnpm build             # production bundle
 pnpm verify:manifest   # manifest, CSP and bundle integrity — 31 checks
 pnpm verify:e2e        # injects the built content script on a live <video> — 24 checks
@@ -221,6 +253,43 @@ Everything runs locally. No network requests, no telemetry, and no frame is ever
 written to disk — pixels are read in GPU memory, plotted, and discarded. Settings
 live in `chrome.storage.local`. See
 [docs/privacy-policy.md](docs/privacy-policy.md).
+
+## Open source, credits & licence
+
+### This project's licence
+
+Web Video Scope is released under the **MIT License**. See [LICENSE](LICENSE)
+for the full text. Copyright (c) 2026 Web Video Scope contributors.
+
+### Open-source components
+
+No runtime dependencies are shipped — the built extension is self-contained.
+The following open-source projects are used at build/test time or as reference
+data, and we are grateful to their authors:
+
+| Project | Licence | How it is used |
+| --- | --- | --- |
+| [TypeScript](https://www.typescriptlang.org/) | Apache-2.0 | Language and compiler |
+| [Vite](https://vitejs.dev/) | MIT | Build tooling |
+| [Vitest](https://vitest.dev/) | MIT | Unit tests |
+| [jsdom](https://github.com/jsdom/jsdom) | MIT | DOM simulation in tests |
+| [Puppeteer](https://pptr.dev/) (`puppeteer-core`) | Apache-2.0 | Capturing the README screenshots |
+| [`@webgpu/types`](https://github.com/gpuweb/types) | BSD-3-Clause | WebGPU type definitions |
+| [`@types/chrome`](https://github.com/DefinitelyTyped/DefinitelyTyped) / [`@types/jsdom`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT | Chrome / jsdom type definitions |
+| [colour-science](https://www.colour-science.org/) | BSD-3-Clause | Generated the CIE standard-observer locus data in `src/core/color/locus-data.ts` (data derived, not code copied) |
+
+Build-tool transitive dependencies resolved in `pnpm-lock.yaml` (esbuild,
+rollup, chai, and the Vitest ecosystem) are likewise dev-only and retain their
+own licences.
+
+The scope behaviour also follows published standards and conventions — ITU-R
+BT.2408 (203-nit SDR reference white), Rec.709 / P3 / Rec.2020, and SMPTE/EBU
+colour-bar targets — and takes UX cues from DaVinci Resolve. These are
+specifications and design references, not copied code.
+
+The demonstration video frame is from
+[youtube.com/watch?v=dQw4w9WgXcQ](https://www.youtube.com/watch?v=dQw4w9WgXcQ)
+and remains © its respective rights holders.
 
 ## Prior art
 

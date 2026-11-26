@@ -29,6 +29,7 @@ interface DocumentPiP {
 }
 
 function getApi(): DocumentPiP | null {
+  if (typeof window === 'undefined') return null;
   const dpip = (window as unknown as { documentPictureInPicture?: DocumentPiP })
     .documentPictureInPicture;
   return dpip && typeof dpip.requestWindow === 'function' ? dpip : null;

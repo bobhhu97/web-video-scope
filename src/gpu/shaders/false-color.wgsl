@@ -62,7 +62,26 @@ fn recoverSignalRgb(rgb: vec3f, mode: u32) -> vec3f {
       pow(max(lin.b, 0.0), invGamma),
     );
   }
-  return vec3f(linearToBt709Itu(lin.r), linearToBt709Itu(lin.g), linearToBt709Itu(lin.b));
+  if (mode == 2u) {
+    return vec3f(linearToBt709Itu(lin.r), linearToBt709Itu(lin.g), linearToBt709Itu(lin.b));
+  }
+  if (mode == 3u) {
+    let e2020 = vec3f(
+      0.6274039 * lin.r + 0.3292830 * lin.g + 0.0433131 * lin.b,
+      0.0690973 * lin.r + 0.9195404 * lin.g + 0.0113623 * lin.b,
+      0.0163914 * lin.r + 0.0880133 * lin.g + 0.8955953 * lin.b,
+    );
+    return clamp(e2020, vec3f(0.0), vec3f(1.0));
+  }
+  if (mode == 4u) {
+    let ep3 = vec3f(
+      0.8224620 * lin.r + 0.1775380 * lin.g,
+      0.0331942 * lin.r + 0.9668058 * lin.g,
+      0.0170826 * lin.r + 0.0723974 * lin.g + 0.9105200 * lin.b,
+    );
+    return clamp(ep3, vec3f(0.0), vec3f(1.0));
+  }
+  return clamp(lin, vec3f(0.0), vec3f(1.0));
 }
 
 fn pqToNits(e: f32) -> f32 {
@@ -188,16 +207,31 @@ fn spectrumFalseColor(ire: f32) -> vec3f {
       nits = srgbToLinear(yClamped) * sdrWhiteNits;
     }
   } else if (srcTr > 0u) {
-    let lr = max(0.0, srgbToLinear(px.r));
-    let lg = max(0.0, srgbToLinear(px.g));
-    let lb = max(0.0, srgbToLinear(px.b));
-    let lumLin = kr * lr + kg * lg + kb * lb;
-    let lumNits = lumLin * sdrWhiteNits;
-    let peakChanNits = max(lr, max(lg, lb)) * sdrWhiteNits;
-    nits = max(lumNits, peakChanNits);
-    // On extended HDR, 1.0 linear = SDR diffuse white (100% SDR IRE); >1.0 maps >1.0 for clip detection
-    ireNorm = select(linearToSrgb(lumLin), 0.99 + clamp((lumLin - 1.0) * 0.1, 0.0, 0.1), lumLin > 1.0);
-    structLuma = clamp(log2(1.0 + lumNits) / 12.0, 0.12, 1.0);
+    // Hardware-decoded HDR video (1u=PQ, 2u=HLG): recoverSignalRgb restored exact [0..1]
+    // non-linear PQ/HLG R'G'B' in the stream's native primaries (e.g. BT.2020).
+    let rCode = clamp(px.r, 0.0, 1.0);
+    let gCode = clamp(px.g, 0.0, 1.0);
+    let bCode = clamp(px.b, 0.0, 1.0);
+    let yCode = kr * rCode + kg * gCode + kb * bCode;
+    var nR = 0.0;
+    var nG = 0.0;
+    var nB = 0.0;
+    var lumNits = 0.0;
+    if (srcTr == 1u) {
+      nR = pqToNits(rCode);
+      nG = pqToNits(gCode);
+      nB = pqToNits(bCode);
+      lumNits = pqToNits(yCode);
+    } else {
+      nR = hlgToNits(rCode);
+      nG = hlgToNits(gCode);
+      nB = hlgToNits(bCode);
+      lumNits = hlgToNits(yCode);
+    }
+    nits = max(lumNits, max(nR, max(nG, nB)));
+    let relLin = lumNits / sdrWhiteNits;
+    ireNorm = select(linearToSrgb(relLin), 0.99 + clamp((relLin - 1.0) * 0.1, 0.0, 0.1), relLin > 1.0);
+    structLuma = yCode;
   } else {
     let r = clamp(px.r, 0.0, 1.0);
     let g = clamp(px.g, 0.0, 1.0);
@@ -234,18 +268,38 @@ fn spectrumFalseColor(ire: f32) -> vec3f {
   } else if (preset == 2u) {
     outRgb = spectrumFalseColor(ireNorm) * (0.76 + 0.24 * clamp(structLuma, 0.0, 1.0));
   } else {
-    // Mode 3: HDR Dual-Nit Zones
-    let detail = 0.42 + 0.58 * clamp(structLuma, 0.0, 1.0);
-    outRgb = vec3f(0.28, 0.86, 0.62) * detail;
-    if (nits < nitLow) {
-      let t = clamp(nits / max(nitLow, 0.1), 0.0, 1.0);
-      outRgb = mix(vec3f(0.12, 0.34, 0.78), vec3f(0.24, 0.75, 0.98), t) * (0.55 + 0.45 * detail);
-    } else if (nits <= nitHigh) {
-      let t = clamp((nits - nitLow) / max(nitHigh - nitLow, 1.0), 0.0, 1.0);
-      outRgb = mix(vec3f(0.26, 0.78, 0.58), vec3f(0.76, 0.88, 0.54), t) * detail;
+    // Mode 3: HDR 3-to-4 Zone Nit False Color
+    // - 4 zones when sdrWhiteNits sits distinctly between nitLow and nitHigh:
+    //     <nitLow Blue/Cyan · nitLow–sdrWhite Green · sdrWhite–nitHigh Yellow · >nitHigh Red
+    // - 3 zones when nitLow coincides with or exceeds sdrWhiteNits (e.g. 203/1k):
+    //     <=nitLow Green · nitLow–nitHigh Yellow · >nitHigh Red
+    let detail = 0.52 + 0.48 * clamp(structLuma, 0.0, 1.0);
+    let hasRefSplit = (sdrWhiteNits > nitLow + 8.0) && (sdrWhiteNits < nitHigh - 15.0);
+    if (hasRefSplit) {
+      if (nits < nitLow) {
+        let t = clamp(nits / max(nitLow, 0.1), 0.0, 1.0);
+        outRgb = mix(vec3f(0.12, 0.42, 0.86), vec3f(0.22, 0.76, 0.98), t) * (0.62 + 0.38 * detail);
+      } else if (nits <= sdrWhiteNits + 1.0) {
+        let t = clamp((nits - nitLow) / max(sdrWhiteNits - nitLow, 1.0), 0.0, 1.0);
+        outRgb = mix(vec3f(0.16, 0.82, 0.46), vec3f(0.26, 0.92, 0.52), t) * detail;
+      } else if (nits <= nitHigh + 1.0) {
+        let t = clamp((nits - sdrWhiteNits) / max(nitHigh - sdrWhiteNits, 1.0), 0.0, 1.0);
+        outRgb = mix(vec3f(0.98, 0.88, 0.16), vec3f(1.0, 0.76, 0.10), t) * (0.80 + 0.20 * detail);
+      } else {
+        let over = clamp((nits - nitHigh) / max(nitHigh * 2.0, 500.0), 0.0, 1.0);
+        outRgb = mix(vec3f(0.98, 0.22, 0.20), vec3f(1.0, 0.08, 0.24), over) * (0.84 + 0.16 * detail);
+      }
     } else {
-      let over = clamp((nits - nitHigh) / max(nitHigh * 2.0, 500.0), 0.0, 1.0);
-      outRgb = mix(vec3f(1.0, 0.56, 0.14), vec3f(1.0, 0.18, 0.46), over) * (0.78 + 0.22 * detail);
+      if (nits <= nitLow + 1.0) {
+        let t = clamp(nits / max(nitLow, 0.1), 0.0, 1.0);
+        outRgb = mix(vec3f(0.14, 0.68, 0.56), vec3f(0.24, 0.88, 0.52), t) * (0.65 + 0.35 * detail);
+      } else if (nits <= nitHigh + 1.0) {
+        let t = clamp((nits - nitLow) / max(nitHigh - nitLow, 1.0), 0.0, 1.0);
+        outRgb = mix(vec3f(0.98, 0.88, 0.16), vec3f(1.0, 0.76, 0.10), t) * (0.80 + 0.20 * detail);
+      } else {
+        let over = clamp((nits - nitHigh) / max(nitHigh * 2.0, 500.0), 0.0, 1.0);
+        outRgb = mix(vec3f(0.98, 0.22, 0.20), vec3f(1.0, 0.08, 0.24), over) * (0.84 + 0.16 * detail);
+      }
     }
   }
 

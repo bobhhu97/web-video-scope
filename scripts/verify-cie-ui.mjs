@@ -62,7 +62,7 @@ try {
 
   await page.evaluate(() => {
     const root = document.getElementById('video-scopes-host').shadowRoot;
-    Array.from(root.querySelectorAll('#layouts button')).find((b) => b.textContent === '1').click();
+    root.querySelector('#layouts button[data-layout="single"]').click();
   });
   await new Promise((r) => setTimeout(r, 500));
   await page.evaluate(() => {
@@ -276,7 +276,7 @@ try {
   // Per-cell reassignment in the four-up layout.
   await page.evaluate(() => {
     const root = document.getElementById('video-scopes-host').shadowRoot;
-    Array.from(root.querySelectorAll('#layouts button')).find((b) => b.textContent === '4').click();
+    root.querySelector('#layouts button[data-layout="grid"]').click();
   });
   await new Promise((r) => setTimeout(r, 3000));
   const cellState = () => page.evaluate(() => {

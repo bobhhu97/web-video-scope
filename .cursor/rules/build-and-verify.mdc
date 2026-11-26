@@ -1,0 +1,76 @@
+---
+description: 构建与测试流程：dist 新鲜度、三种 vite 构建模式、读 dist 的单测、浏览器套件用法。
+globs: package.json,vite.config.ts,vitest.config.ts,scripts/**,tests/**
+alwaysApply: false
+---
+
+# 构建与验证流程
+
+## 一、构建
+
+```bash
+pnpm build    # tsc --noEmit → vite build (content.js, IIFE) → vite build --mode background → assert-fresh-build
+```
+
+`vite.config.ts` 有**三种模式**，不能合并：
+
+- 默认：`src/content/index.ts` → `dist/content.js`，**必须 IIFE**（Chrome 按 classic script 注入，
+  且 `rollup` 无法在 IIFE 下多入口）
+- `--mode background`：service worker → `dist/background.js`，`emptyOutDir: false`（不能清掉 content.js）
+- `--mode harness`：输出到 `.harness/`，**不进 dist/**（商店包里不能有测试台）
+
+`scripts/assert-fresh-build.mjs` 会拦住"dist/ 比 src/ 旧"。它的存在原因：`tsc --noEmit` 失败时
+`&&` 短路，旧的 dist 留在原地，之后测试与插件都在跑旧代码，"修了没效果"会反复几轮。
+
+## 二、测试分两类
+
+**纯单测（node，无 GPU）**
+
+```bash
+pnpm test        # 35 个文件 / 290 个用例，约 5s
+```
+
+**读 `dist/content.js` 的单测** —— 这六个套件导入的是构建产物，不是源码：
+
+`tests/content-script.test.ts`、`opt-in-startup`、`hud-placement`、`host-recovery`、
+`panel-resilience`、`on-demand-clean-page`
+
+改了源码不 `pnpm build`，它们会"测旧代码还全绿"。这是本仓库最贵的陷阱。
+
+**真实 Chrome 套件**（需要硬件 WebGPU，脚本里硬编码 macOS 的 Chrome 路径）
+
+```bash
+node scripts/verify-manifest.mjs    # 清单/CSP/权限/包体积
+node scripts/verify-e2e.mjs         # 注入 dist/content.js 到真实 <video> 页
+node scripts/verify-layout.mjs      # 布局几何，@2x
+node scripts/verify-cie-ui.mjs      # CIE 1:1 轴、缩放
+node scripts/verify-scatter.mjs     # 点云
+node scripts/verify-cie-fill.mjs    # 点云覆盖率
+node scripts/verify-ire.mjs         # IRE 读数与网格是否自洽
+pnpm verify                         # .harness 测试台 + 量像素
+```
+
+注意：端口在各自脚本里硬编码，`4379` 被 `verify-round2-features.mjs` 与 `verify-hdr-zones.mjs`
+同时占用 —— 不要并行跑。
+
+## 三、写浏览器断言的铁律
+
+1. **量像素，不看截图。** 断言写成"75% 合法白条必须读 75±4 IRE"、"3 号按钮必须得到 3 个有尺寸的 panel"。
+   截图只能用于 README。
+2. **WebGPU canvas 只有在 present 之后才有像素。** `createImageBitmap` 会抢在 present 前
+   读到全透明黑，从而把"画对了"误判成"空图"。必须轮询到出现亮像素再断言。
+3. **灰阶斜坡不能测点云 scope。** 中性斜坡的每个像素色度相同，正确的 CIE 图只有一个点，
+   与"坏掉的空图"无法区分。点云套件必须用彩条或色相×饱和度扫描。
+4. **`?vsInline=1`** 让面板留在页内而不是弹到 Document PiP，验证脚本都依赖它。
+
+## 四、截图
+
+```bash
+pnpm capture:readme    # 重新生成 README 里所有图片
+```
+
+它会打开 `docs/demo/index.html`（合成片源，`captureStream` 喂给 `<video>`），
+注入构建产物，并在保存前**测量每个 scope canvas**——空白图会让 capture 失败，
+而不是作为一张漂亮的空图发布出去。
+
+`public/icons/*` 由 `scripts/make-icons.mjs` 生成，不要手改 PNG。

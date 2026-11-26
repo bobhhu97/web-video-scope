@@ -22,6 +22,7 @@ import {
   assignCellSlot,
   defaultCellForMode,
   resolveCells,
+  resolveTraceForMode,
   supportsHdrZones,
   type CellConfig,
   type FalseColorPreset,
@@ -172,6 +173,25 @@ const STYLE = `
   nav.bar .sep { width: 1px; height: 15px; background: #ffffff1a; flex: 0 0 auto; }
   nav.bar .bar-spacer { flex: 1 1 auto; min-width: 2px; }
   nav.bar button { white-space: nowrap; min-width: 24px; padding: 0 5px; height: 20px; }
+  #layouts button {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; min-width: 24px; height: 20px; padding: 0;
+  }
+  #layouts button svg {
+    width: 13px; height: 13px; display: block; pointer-events: none;
+  }
+  #modes button[aria-pressed="true"],
+  #modes button.scope-active {
+    background: #143a27;
+    border-color: #34d399;
+    color: #d1fae5;
+    box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 0.18);
+  }
+  #modes button[aria-pressed="true"]:hover,
+  #modes button.scope-active:hover {
+    background: #1a4b33;
+    border-color: #6ee7b7;
+  }
   nav.bar select {
     width: auto; font-size: 10px; padding: 1px 4px; height: 20px;
     background: #151e27; color: #cfe0ea; border: 1px solid #ffffff22; border-radius: 4px;
@@ -392,6 +412,16 @@ const STYLE = `
     background: #3a2a12; color: #f0c070;
     border-bottom: 1px solid #ffffff10;
   }
+
+  .resize-grip {
+    position: absolute; right: 0; bottom: 0; width: 14px; height: 14px;
+    cursor: nwse-resize; z-index: 60; touch-action: none;
+    background: linear-gradient(135deg, transparent 52%, #7f95a666 52%, #7f95a666 64%, transparent 64%, transparent 76%, #7f95a699 76%);
+    border-bottom-right-radius: 6px;
+  }
+  .resize-grip:hover {
+    background: linear-gradient(135deg, transparent 52%, #34d399aa 52%, #34d399aa 64%, transparent 64%, transparent 76%, #34d399dd 76%);
+  }
 `;
 
 export class Hud {
@@ -433,12 +463,38 @@ export class Hud {
     }
     const host = doc.createElement('div');
     host.id = HOST_ID;
-    host.style.cssText = opts.fill
-      ? 'all:initial;position:absolute;inset:0;width:100%;height:100%;' +
-        'min-width:320px;min-height:240px;z-index:1;overflow:hidden;'
-      : 'all:initial;position:fixed;top:16px;right:16px;left:auto;' +
-        'width:780px;height:560px;min-width:340px;min-height:260px;' +
-        'z-index:2147483646;resize:both;overflow:hidden;';
+    const imp = (prop: string, val: string): void => {
+      host.style.setProperty(prop, val, 'important');
+    };
+    imp('display', 'block');
+    imp('visibility', 'visible');
+    imp('opacity', '1');
+    imp('margin', '0');
+    imp('padding', '0');
+    imp('border', '0');
+    imp('background', 'transparent');
+    imp('box-sizing', 'border-box');
+    imp('overflow', 'hidden');
+    if (opts.fill) {
+      imp('position', 'absolute');
+      imp('inset', '0');
+      imp('width', '100%');
+      imp('height', '100%');
+      imp('min-width', '320px');
+      imp('min-height', '240px');
+      imp('z-index', '1');
+    } else {
+      imp('position', 'fixed');
+      imp('top', '16px');
+      imp('right', '16px');
+      imp('left', 'auto');
+      imp('bottom', 'auto');
+      imp('width', '780px');
+      imp('height', '560px');
+      imp('min-width', '340px');
+      imp('min-height', '260px');
+      imp('z-index', '2147483646');
+    }
 
     const root = host.attachShadow({ mode: 'open' });
     this.renderedLang = this.state.lang ?? 'en';
@@ -625,13 +681,13 @@ export class Hud {
   private applyPosition(): void {
     if (!this.host || this.isFill) return;
     const { left, top, right } = this.state.hostPosition;
-    this.host.style.top = `${top}px`;
+    this.host.style.setProperty('top', `${top}px`, 'important');
     if (left === null) {
-      this.host.style.left = 'auto';
-      this.host.style.right = `${right}px`;
+      this.host.style.setProperty('left', 'auto', 'important');
+      this.host.style.setProperty('right', `${right}px`, 'important');
     } else {
-      this.host.style.left = `${left}px`;
-      this.host.style.right = 'auto';
+      this.host.style.setProperty('left', `${left}px`, 'important');
+      this.host.style.setProperty('right', 'auto', 'important');
     }
   }
 
@@ -651,16 +707,32 @@ export class Hud {
 
   private renderLayoutsHtml(): string {
     const s = this.i18n();
-    const items: { layout: Layout; label: string; title: string }[] = [
-      { layout: 'single', label: '1', title: s.layout1 },
-      { layout: 'pair', label: '2', title: s.layout2 },
-      { layout: 'triple', label: '3', title: s.layout3 },
-      { layout: 'grid', label: '4', title: s.layout4 },
+    const items: { layout: Layout; icon: string; title: string }[] = [
+      {
+        layout: 'single',
+        title: s.layout1,
+        icon: `<svg viewBox="0 0 14 14" aria-hidden="true" fill="currentColor" fill-opacity="0.16" stroke="currentColor" stroke-width="1.25"><rect x="1.5" y="2" width="11" height="10" rx="1.2"/></svg>`,
+      },
+      {
+        layout: 'pair',
+        title: s.layout2,
+        icon: `<svg viewBox="0 0 14 14" aria-hidden="true" fill="currentColor" fill-opacity="0.16" stroke="currentColor" stroke-width="1.2"><rect x="1.3" y="2" width="4.8" height="10" rx="1"/><rect x="7.9" y="2" width="4.8" height="10" rx="1"/></svg>`,
+      },
+      {
+        layout: 'triple',
+        title: s.layout3,
+        icon: `<svg viewBox="0 0 14 14" aria-hidden="true" fill="currentColor" fill-opacity="0.16" stroke="currentColor" stroke-width="1.15"><rect x="1.5" y="1.4" width="11" height="2.7" rx="0.7"/><rect x="1.5" y="5.65" width="11" height="2.7" rx="0.7"/><rect x="1.5" y="9.9" width="11" height="2.7" rx="0.7"/></svg>`,
+      },
+      {
+        layout: 'grid',
+        title: s.layout4,
+        icon: `<svg viewBox="0 0 14 14" aria-hidden="true" fill="currentColor" fill-opacity="0.16" stroke="currentColor" stroke-width="1.2"><rect x="1.3" y="1.5" width="4.8" height="4.6" rx="0.9"/><rect x="7.9" y="1.5" width="4.8" height="4.6" rx="0.9"/><rect x="1.3" y="7.9" width="4.8" height="4.6" rx="0.9"/><rect x="7.9" y="7.9" width="4.8" height="4.6" rx="0.9"/></svg>`,
+      },
     ];
     return items
       .map(
         (l) =>
-          `<button data-layout="${l.layout}" type="button" title="${l.title}" aria-pressed="false">${l.label}</button>`,
+          `<button data-layout="${l.layout}" type="button" title="${l.title}" aria-label="${l.title}" aria-pressed="false">${l.icon}</button>`,
       )
       .join('');
   }
@@ -693,6 +765,16 @@ export class Hud {
               <div class="set-field">
                 <span>${s.lblGratBright}</span>
                 <input id="set-grat-bright" type="range" min="0.35" max="1.6" step="0.05" value="${this.state.graticuleBrightness ?? 1}">
+              </div>
+              <div class="set-field">
+                <span>${s.lblTraceColoring}</span>
+                <select id="set-trace-mode">
+                  <option value="default">${s.traceDefault}</option>
+                  <option value="colorize">${s.traceColorize}</option>
+                  <option value="monochrome">${s.traceMono}</option>
+                  <option value="green">${s.traceGreen}</option>
+                  <option value="hdr-zones">${s.traceHdrZones}</option>
+                </select>
               </div>
             </div>
           </div>
@@ -876,9 +958,9 @@ export class Hud {
             <label title="Display peak / Highlight clipping warning in cd/m² (nits)"><span id="lbl-nit-peak">${s.peakNit}</span>
               <input id="nit-high" class="nit-hi" type="number" min="10" max="10000" step="10" value="1000">
             </label>
-            <button id="preset-100-1000" type="button" title="100 nits shadow / 1000 nits display peak">100/1k</button>
-            <button id="preset-203-1000" type="button" title="ITU BT.2408 203 nits ref white / 1000 nits peak">203/1k</button>
-            <button id="preset-203-4000" type="button" title="203 nits ref white / 4000 nits mastering peak">203/4k</button>
+            <button id="preset-100-1000" type="button" title="4-Zone: <100n Blue · 100–203n Green · 203–1000n Yellow · >1000n Red">100/1k</button>
+            <button id="preset-203-1000" type="button" title="3-Zone: ≤203n Green · 203–1000n Yellow · >1000n Red">203/1k</button>
+            <button id="preset-203-4000" type="button" title="3-Zone: ≤203n Green · 203–4000n Yellow · >4000n Red">203/4k</button>
             <button id="zone-all-btn" type="button" title="${s.zoneColorAllTitle}">${s.zoneColorAll}</button>
           </div>
           <div class="opts">
@@ -942,6 +1024,7 @@ export class Hud {
             </label>
           </div>
         </details>
+        ${this.isFill ? '' : '<div class="resize-grip" id="resize-grip" aria-hidden="true"></div>'}
       </div>`;
   }
 
@@ -1033,49 +1116,38 @@ export class Hud {
   }
 
   private renderCellPillsHtml(cell: CellConfig): string {
-    const bw = cell.traceMode === 'monochrome';
-    const nit = cell.traceMode === 'hdr-zones';
-    const bwBtn = `<button type="button" class="pill ${bw ? 'on' : ''}" data-act="mono" title="Monochrome B&W (no color tint)">B&amp;W</button>`;
-    const nitBtn = `<button type="button" class="pill ${nit ? 'nit-on' : ''}" data-act="nit" title="Colorize by Dual-Nit HDR thresholds">Nit</button>`;
-
+    // Coloring (Clr / B&W / Nit / Grn) is intentionally configured inside Settings (⚙)
+    // rather than inline beside signal modes, so users never confuse coloring with signal channel selection.
     if (isWaveMode(cell.mode)) {
       const ch = cell.waveChannels ?? (cell.mode === 'waveform-rgb' ? 'RGB' : 'Y');
-      const chBtns = (['Y', 'RGB', 'YRGB', 'YUV'] as WaveChannelMode[])
+      return (['Y', 'RGB', 'YRGB', 'YUV'] as WaveChannelMode[])
         .map((c) => `<button type="button" class="pill ${ch === c ? 'on' : ''}" data-wave="${c}">${c}</button>`)
         .join('');
-      const colBtn = `<button type="button" class="pill ${cell.traceMode === 'colorize' ? 'on' : ''}" data-act="colorize" title="DaVinci Resolve Source Colorize">Clr</button>`;
-      return `${chBtns}${colBtn}${bwBtn}${nitBtn}`;
     }
     if (cell.mode === 'waveform-parade') {
       const pm = cell.paradeMode ?? 'RGB';
-      const pBtns = (['RGB', 'YRGB', 'YUV'] as ParadeMode[])
+      return (['RGB', 'YRGB', 'YUV'] as ParadeMode[])
         .map((p) => `<button type="button" class="pill ${pm === p ? 'on' : ''}" data-parade="${p}">${p}</button>`)
         .join('');
-      return `${pBtns}${bwBtn}${nitBtn}`;
     }
     if (cell.mode === 'histogram') {
       const hm = cell.histMode ?? 'YRGB';
-      const hBtns = (['Y', 'RGB', 'YRGB', 'YUV'] as HistChannelMode[])
+      return (['Y', 'RGB', 'YRGB', 'YUV'] as HistChannelMode[])
         .map((h) => `<button type="button" class="pill ${hm === h ? 'on' : ''}" data-hist="${h}">${h}</button>`)
         .join('');
-      return `${hBtns}${bwBtn}${nitBtn}`;
     }
     if (cell.mode === 'vectorscope') {
       const b75 = (cell.barTargets ?? 0.75) === 0.75;
-      const z2 = Math.abs((cell.zoom ?? 1) - 2) < 0.08;
+      const s2x = !!cell.vecScale2x;
       const skin = cell.showSkinLine !== false;
-      const grn = cell.traceMode === 'green';
-      // Clean Resolve-style Vectorscope pills: NO Nit button, WITH direct 2× zoom toggle!
+      const s = this.i18n();
       return (
         `<button type="button" class="pill ${b75 ? 'on' : ''}" data-bars="0.75">75%</button>` +
         `<button type="button" class="pill ${!b75 ? 'on' : ''}" data-bars="1">100%</button>` +
-        `<button type="button" class="pill ${z2 ? 'on' : ''}" data-act="zoom2x" title="Toggle 2× Vectorscope Zoom">2×</button>` +
-        `<button type="button" class="pill ${grn ? 'on' : ''}" data-act="green" title="Classic green CRT trace">Grn</button>` +
-        `${bwBtn}` +
+        `<button type="button" class="pill ${s2x ? 'on' : ''}" data-act="zoom2x" title="${s.vecSignal2xTitle}">2×</button>` +
         `<button type="button" class="pill ${skin ? 'on' : ''}" data-act="skin" title="Skin Tone I-line">Skin</button>`
       );
     }
-    // CIE: NO Nit button!
     const xy = cell.coord === 'xy';
     const gSet = new Set(cell.gamuts);
     return (
@@ -1083,8 +1155,7 @@ export class Hud {
       `<button type="button" class="pill ${!xy ? 'on' : ''}" data-coord="uv">u'v'</button>` +
       `<button type="button" class="pill ${gSet.has('rec709') ? 'on' : ''}" data-gamut="rec709">709</button>` +
       `<button type="button" class="pill ${gSet.has('p3') ? 'on' : ''}" data-gamut="p3">P3</button>` +
-      `<button type="button" class="pill ${gSet.has('rec2020') ? 'on' : ''}" data-gamut="rec2020">2020</button>` +
-      `${bwBtn}`
+      `<button type="button" class="pill ${gSet.has('rec2020') ? 'on' : ''}" data-gamut="rec2020">2020</button>`
     );
   }
 
@@ -1176,7 +1247,10 @@ export class Hud {
           </select>
         </div>
         <div class="pop-row"><span>${s.popOverlay}</span>
-          <div class="pop-checks"><label><input type="checkbox" data-pop="showSkinLine" ${cell.showSkinLine !== false ? 'checked' : ''}> ${s.skinLine}</label></div>
+          <div class="pop-checks">
+            <label><input type="checkbox" data-pop="showSkinLine" ${cell.showSkinLine !== false ? 'checked' : ''}> ${s.skinLine}</label>
+            <label title="${s.vecSignal2xTitle}"><input type="checkbox" data-pop="vecScale2x" ${cell.vecScale2x ? 'checked' : ''}> ${s.vecSignal2x}</label>
+          </div>
         </div>`;
     } else if (cell.mode === 'cie') {
       const g = new Set(cell.gamuts);
@@ -1367,10 +1441,17 @@ export class Hud {
             if (zInput && this.doc?.activeElement !== zInput) {
               zInput.value = String(z);
             }
+            const sig2xChk = pop.querySelector<HTMLInputElement>('input[data-pop="vecScale2x"]');
+            if (sig2xChk) sig2xChk.checked = !!cell.vecScale2x;
+            const traceSel = pop.querySelector<HTMLSelectElement>('select[data-pop="traceMode"]');
+            if (traceSel && this.doc?.activeElement !== traceSel) {
+              traceSel.value = cell.traceMode;
+            }
           }
         }
       }
     }
+    this.syncModeButtons();
   }
 
   private focusSlot(slot: number): void {
@@ -1430,6 +1511,7 @@ export class Hud {
       };
       this.openPopoverSlot = null;
       this.handlers.onCellsReplace(layout, nextCells);
+      this.refreshCellChrome();
     });
 
     // Delegated quick-pills bar clicks
@@ -1444,11 +1526,7 @@ export class Hud {
       if (btn.dataset.wave) {
         const wc = btn.dataset.wave as WaveChannelMode;
         const nextMode: ScopeMode = wc === 'Y' ? 'waveform-luma' : 'waveform-rgb';
-        const nextTrace: TraceColorMode =
-          cell.traceMode === 'monochrome' || cell.traceMode === 'hdr-zones' || cell.traceMode === 'colorize'
-            ? cell.traceMode
-            : 'channel';
-        this.emitCellPatch(slot, { mode: nextMode, waveChannels: wc, traceMode: nextTrace });
+        this.emitCellPatch(slot, { mode: nextMode, waveChannels: wc });
         return;
       }
       if (btn.dataset.parade) {
@@ -1477,18 +1555,7 @@ export class Hud {
       }
       const act = btn.dataset.act;
       if (act === 'zoom2x') {
-        const is2x = Math.abs((cell.zoom ?? 1) - 2) < 0.08;
-        this.applyPresetZoom(slot, cell, is2x ? 1 : 2);
-      } else if (act === 'mono') {
-        const def: TraceColorMode =
-          cell.mode === 'vectorscope' || cell.mode === 'cie' ? 'colorize' : 'channel';
-        this.emitCellPatch(slot, { traceMode: cell.traceMode === 'monochrome' ? def : 'monochrome' });
-      } else if (act === 'nit' && supportsHdrZones(cell.mode)) {
-        this.emitCellPatch(slot, { traceMode: cell.traceMode === 'hdr-zones' ? 'channel' : 'hdr-zones' });
-      } else if (act === 'colorize') {
-        this.emitCellPatch(slot, { traceMode: cell.traceMode === 'colorize' ? 'channel' : 'colorize' });
-      } else if (act === 'green') {
-        this.emitCellPatch(slot, { traceMode: cell.traceMode === 'green' ? 'colorize' : 'green' });
+        this.emitCellPatch(slot, { vecScale2x: !cell.vecScale2x });
       } else if (act === 'skin') {
         this.emitCellPatch(slot, { showSkinLine: cell.showSkinLine === false });
       }
@@ -1576,6 +1643,8 @@ export class Hud {
         this.emitCellPatch(slot, { lowPass: (target as HTMLInputElement).checked });
       } else if (key === 'showSkinLine') {
         this.emitCellPatch(slot, { showSkinLine: (target as HTMLInputElement).checked });
+      } else if (key === 'vecScale2x') {
+        this.emitCellPatch(slot, { vecScale2x: (target as HTMLInputElement).checked });
       } else if (key === 'gain') {
         this.emitCellPatch(slot, { gain: Number(target.value) });
       } else if (key === 'gamma') {
@@ -1622,7 +1691,9 @@ export class Hud {
           this.refreshCellChrome();
         }
         const rect = stage.getBoundingClientRect();
-        if (rect.width < 8 || rect.height < 8) return;
+        const cw = stage.clientWidth || rect.width;
+        const ch = stage.clientHeight || rect.height;
+        if (cw < 8 || ch < 8) return;
         const mx = e.clientX - rect.left;
         const my = e.clientY - rect.top;
 
@@ -1638,8 +1709,8 @@ export class Hud {
 
         if (cell.mode === 'vectorscope') {
           const zRes = zoomVectorscopeAt(
-            rect.width,
-            rect.height,
+            cw,
+            ch,
             cell.zoom || 1,
             cell.panX ?? 0,
             cell.panY ?? 0,
@@ -1650,8 +1721,8 @@ export class Hud {
           this.emitCellPatch(slot, { zoom: zRes.zoom, panX: zRes.panCb, panY: zRes.panCr });
         } else if (cell.mode === 'cie') {
           const zRes = zoomCieViewportAt(
-            rect.width,
-            rect.height,
+            cw,
+            ch,
             cell.coord,
             cell.zoom || 1,
             cell.panX,
@@ -1663,8 +1734,8 @@ export class Hud {
           );
           this.emitCellPatch(slot, { zoom: zRes.zoom, panX: zRes.panX, panY: zRes.panY });
         } else {
-          const plotW = Math.max(8, rect.width - WAVE_PAD.left - WAVE_PAD.right);
-          const plotH = Math.max(8, rect.height - WAVE_PAD.top - WAVE_PAD.bottom);
+          const plotW = Math.max(8, cw - WAVE_PAD.left - WAVE_PAD.right);
+          const plotH = Math.max(8, ch - WAVE_PAD.top - WAVE_PAD.bottom);
           let fx = Math.min(1, Math.max(0, (mx - WAVE_PAD.left) / plotW));
           if (cell.mode === 'waveform-parade') {
             const slices = cell.paradeMode === 'YRGB' ? 4 : 3;
@@ -1707,10 +1778,12 @@ export class Hud {
       if (!cell || (cell.zoom ?? 1) <= 1.005) return;
       e.preventDefault();
       const rect = stage.getBoundingClientRect();
+      const cw = stage.clientWidth || rect.width;
+      const ch = stage.clientHeight || rect.height;
       let initX = cell.panX ?? 0;
       let initY = cell.panY ?? 0;
       if (cell.mode === 'cie' && (cell.panX == null || cell.panY == null)) {
-        const cf = cieViewportFrame(rect.width, rect.height, cell.coord, cell.zoom, null, null, 1);
+        const cf = cieViewportFrame(cw, ch, cell.coord, cell.zoom, null, null, 1);
         initX = cf.x0;
         initY = cf.y0;
       }
@@ -1731,12 +1804,14 @@ export class Hud {
     stage.addEventListener('pointermove', (e) => {
       if (!panDrag) return;
       const rect = stage.getBoundingClientRect();
+      const cw = stage.clientWidth || rect.width;
+      const ch = stage.clientHeight || rect.height;
       const dx = e.clientX - panDrag.startX;
       const dy = e.clientY - panDrag.startY;
       const z = panDrag.zoom;
 
       if (panDrag.mode === 'vectorscope') {
-        const vf = vectorscopeFrame(rect.width, rect.height, z, 0, 0);
+        const vf = vectorscopeFrame(cw, ch, z, 0, 0);
         const [cCb, cCr] = clampVectorscopePan(
           z,
           panDrag.initPanX - dx / vf.scale,
@@ -1745,8 +1820,8 @@ export class Hud {
         this.emitCellPatch(slot, { panX: cCb, panY: cCr });
       } else if (panDrag.mode === 'cie') {
         const cf = cieViewportFrame(
-          rect.width,
-          rect.height,
+          cw,
+          ch,
           panDrag.coord,
           z,
           panDrag.initPanX,
@@ -1754,8 +1829,8 @@ export class Hud {
           1,
         );
         const clamped = cieViewportFrame(
-          rect.width,
-          rect.height,
+          cw,
+          ch,
           panDrag.coord,
           z,
           panDrag.initPanX - dx / cf.scale,
@@ -1764,8 +1839,8 @@ export class Hud {
         );
         this.emitCellPatch(slot, { panX: clamped.x0, panY: clamped.y0 });
       } else {
-        const plotW = Math.max(8, rect.width - WAVE_PAD.left - WAVE_PAD.right);
-        const plotH = Math.max(8, rect.height - WAVE_PAD.top - WAVE_PAD.bottom);
+        const plotW = Math.max(8, cw - WAVE_PAD.left - WAVE_PAD.right);
+        const plotH = Math.max(8, ch - WAVE_PAD.top - WAVE_PAD.bottom);
         const sliceW = panDrag.mode === 'waveform-parade' ? plotW / panDrag.paradeSlices : plotW;
         const maxPan = Math.max(0, 1 - 1 / z);
         const nx = Math.min(maxPan, Math.max(0, panDrag.initPanX - dx / sliceW / z));
@@ -1791,12 +1866,14 @@ export class Hud {
   private syncModeButtons(): void {
     const root = this.root;
     if (!root) return;
+    const activeCells = resolveCells(this.state, this.state.layout);
     for (const btn of Array.from(root.querySelectorAll<HTMLButtonElement>('#modes button'))) {
       const m = btn.dataset.mode as ScopeMode;
-      const match =
-        this.state.layout === 'single' &&
-        (m === this.state.mode || (isWaveMode(m) && isWaveMode(this.state.mode)));
+      const match = activeCells.some(
+        (c) => c.mode === m || (isWaveMode(m) && isWaveMode(c.mode)),
+      );
       btn.setAttribute('aria-pressed', match ? 'true' : 'false');
+      btn.classList.toggle('scope-active', match);
     }
     for (const btn of Array.from(root.querySelectorAll<HTMLButtonElement>('#layouts button'))) {
       btn.setAttribute('aria-pressed', btn.dataset.layout === this.state.layout ? 'true' : 'false');
@@ -1833,6 +1910,7 @@ export class Hud {
           cells: nextCells,
         };
         this.handlers.onCellsReplace('single', [singleCell]);
+        this.syncModeButtons();
       });
     }
   }
@@ -1865,6 +1943,7 @@ export class Hud {
       set('set-fc-opacity', String(this.state.falseColorOpacity ?? 0.88));
       set('set-panel-opacity', String(this.state.panelOpacity ?? 0.97));
       set('set-grat-bright', String(this.state.graticuleBrightness ?? 1));
+      set('set-trace-mode', this.state.defaultTraceMode ?? 'default');
 
       const fcEnableChk = root.getElementById('set-fc-enable') as HTMLInputElement | null;
       if (fcEnableChk) fcEnableChk.checked = !!this.state.videoFalseColor;
@@ -1925,6 +2004,23 @@ export class Hud {
       const graticuleBrightness = Number(el.value);
       this.state = { ...this.state, graticuleBrightness };
       this.handlers.onStateChange({ graticuleBrightness });
+    });
+
+    bindSet('set-trace-mode', 'change', (el) => {
+      const defaultTraceMode = el.value as NonNullable<HudState['defaultTraceMode']>;
+      const layout = this.state.layout;
+      const nextCells = resolveCells(this.state, layout).map((c) => ({
+        ...c,
+        traceMode: resolveTraceForMode(c.mode, defaultTraceMode),
+      }));
+      this.state = {
+        ...this.state,
+        defaultTraceMode,
+        cells: { ...this.state.cells, [layout]: nextCells },
+      };
+      this.handlers.onStateChange({ defaultTraceMode });
+      this.handlers.onCellsReplace(layout, nextCells);
+      this.refreshCellChrome();
     });
 
     bindSet('set-primaries', 'change', (el) => {
@@ -2215,9 +2311,9 @@ export class Hud {
     });
     header.addEventListener('pointermove', (e) => {
       if (!drag || !this.host) return;
-      this.host.style.left = `${Math.max(0, drag.left + e.clientX - drag.x)}px`;
-      this.host.style.right = 'auto';
-      this.host.style.top = `${Math.max(0, drag.top + e.clientY - drag.y)}px`;
+      this.host.style.setProperty('left', `${Math.max(0, drag.left + e.clientX - drag.x)}px`, 'important');
+      this.host.style.setProperty('right', 'auto', 'important');
+      this.host.style.setProperty('top', `${Math.max(0, drag.top + e.clientY - drag.y)}px`, 'important');
     });
     header.addEventListener('pointerup', () => {
       if (!drag || !this.host) return;
@@ -2227,6 +2323,31 @@ export class Hud {
         hostPosition: { left: Math.round(rect.left), top: Math.round(rect.top), right: 16 },
       });
     });
+
+    const grip = root.getElementById('resize-grip');
+    if (grip && !this.isFill) {
+      let rDrag: { x: number; y: number; w: number; h: number } | null = null;
+      grip.addEventListener('pointerdown', (e) => {
+        if (!this.host) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const rect = this.host.getBoundingClientRect();
+        rDrag = { x: e.clientX, y: e.clientY, w: rect.width, h: rect.height };
+        grip.setPointerCapture(e.pointerId);
+      });
+      grip.addEventListener('pointermove', (e) => {
+        if (!rDrag || !this.host) return;
+        const nextW = Math.max(340, Math.round(rDrag.w + e.clientX - rDrag.x));
+        const nextH = Math.max(260, Math.round(rDrag.h + e.clientY - rDrag.y));
+        this.host.style.setProperty('width', `${nextW}px`, 'important');
+        this.host.style.setProperty('height', `${nextH}px`, 'important');
+      });
+      grip.addEventListener('pointerup', () => {
+        if (!rDrag) return;
+        rDrag = null;
+        this.handlers.onResize?.();
+      });
+    }
 
     this.syncModeButtons();
   }

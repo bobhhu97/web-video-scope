@@ -127,9 +127,13 @@ export function zoomCieAt(
 }
 
 /**
- * Padded CIE viewport frame used by UI graticule and GPU renderer so the top of
- * the CIE 1976 u'v' spectral locus (`v' ≈ 0.584`), axis tick labels (`0.6`), and
- * header metadata never collide at the canvas border while keeping exact 1:1 scale.
+ * Padded CIE viewport frame used by UI graticule and GPU renderer.
+ *
+ * Uses the ENTIRE padded plot rectangle `[padL, padT, plotW, plotH]` at strict
+ * 1:1 isotropic axis scale (`pxPerUnitX === pxPerUnitY === baseScale * zoom`),
+ * so zooming and panning expand smoothly across the full panel width/height while
+ * keeping axes, square grid cells, spectral locus, gamut triangles, and GPU scatter
+ * 100% locked together without bleeding over axis labels or the top header bar.
  */
 export function cieViewportFrame(
   w: number,
@@ -140,18 +144,66 @@ export function cieViewportFrame(
   panY?: number | null,
   dpr = 1,
 ): CieFrame {
+  const [bx0, by0, bx1, by1] = CIE_BOUNDS[coord];
   const s = Math.max(0.5, dpr);
-  const padL = Math.min(32 * s, w * 0.15);
-  const padR = Math.min(20 * s, w * 0.09);
-  const padT = Math.min(28 * s, h * 0.16);
-  const padB = Math.min(20 * s, h * 0.12);
-  const innerW = Math.max(8, w - padL - padR);
-  const innerH = Math.max(8, h - padT - padB);
-  const inner = cieFrame(innerW, innerH, coord, zoom, panX, panY);
+  const safeW = Math.max(16 * s, w);
+  const safeH = Math.max(16 * s, h);
+
+  const padL = Math.min(30 * s, safeW * 0.15);
+  const padR = Math.min(14 * s, safeW * 0.07);
+  const padT = Math.min(24 * s, safeH * 0.14);
+  const padB = Math.min(20 * s, safeH * 0.12);
+  const plotW = Math.max(8 * s, safeW - padL - padR);
+  const plotH = Math.max(8 * s, safeH - padT - padB);
+
+  const z = Math.max(1, Math.min(16, zoom));
+  const fullW = bx1 - bx0;
+  const fullH = by1 - by0;
+
+  const baseScale = Math.min(plotW / fullW, plotH / fullH);
+  const scale = baseScale * z;
+  const spanX = plotW / scale;
+  const spanY = plotH / scale;
+
+  // 1x centered span bounds so cursor-anchored zoom-in from 1x never hits a clamp wall
+  const spanX1 = plotW / baseScale;
+  const spanY1 = plotH / baseScale;
+  const center1X0 = (bx0 + bx1) * 0.5 - spanX1 * 0.5;
+  const center1Y0 = (by0 + by1) * 0.5 - spanY1 * 0.5;
+  const minX0 = Math.min(bx0 - 0.05, center1X0);
+  const maxX1 = Math.max(bx1 + 0.05, center1X0 + spanX1);
+  const minY0 = Math.min(by0 - 0.05, center1Y0);
+  const maxY1 = Math.max(by1 + 0.05, center1Y0 + spanY1);
+
+  let reqX0: number;
+  let reqY0: number;
+  if (panX != null && Number.isFinite(panX) && panY != null && Number.isFinite(panY)) {
+    reqX0 = panX;
+    reqY0 = panY;
+  } else if (z <= 1.0001) {
+    reqX0 = center1X0;
+    reqY0 = center1Y0;
+  } else {
+    const [wx, wy] = WHITE_POINT[coord];
+    reqX0 = wx - spanX * 0.5;
+    reqY0 = wy - spanY * 0.5;
+  }
+
+  let x0 = Math.min(Math.max(reqX0, minX0), maxX1 - spanX);
+  let y0 = Math.min(Math.max(reqY0, minY0), maxY1 - spanY);
+  if (!Number.isFinite(x0)) x0 = center1X0;
+  if (!Number.isFinite(y0)) y0 = center1Y0;
+
   return {
-    ...inner,
-    left: padL + inner.left,
-    top: padT + inner.top,
+    left: padL,
+    top: padT,
+    width: plotW,
+    height: plotH,
+    scale,
+    x0,
+    y0,
+    x1: x0 + spanX,
+    y1: y0 + spanY,
   };
 }
 
@@ -171,10 +223,12 @@ export function zoomCieViewportAt(
   const z1 = Math.max(1, Math.min(16, nextZoom));
   if (z1 <= 1.0001) return { zoom: 1, panX: null, panY: null };
   const before = cieViewportFrame(w, h, coord, zoom, panX, panY, dpr);
-  const [cx, cy] = screenToFrame(before, cursorX, cursorY);
+  const ax = Math.min(before.left + before.width, Math.max(before.left, cursorX));
+  const ay = Math.min(before.top + before.height, Math.max(before.top, cursorY));
+  const [cx, cy] = screenToFrame(before, ax, ay);
   const afterShape = cieViewportFrame(w, h, coord, z1, 0, 0, dpr);
-  const rawX0 = cx - (cursorX - afterShape.left) / afterShape.scale;
-  const rawY0 = cy - (afterShape.top + afterShape.height - cursorY) / afterShape.scale;
+  const rawX0 = cx - (ax - afterShape.left) / afterShape.scale;
+  const rawY0 = cy - (afterShape.top + afterShape.height - ay) / afterShape.scale;
   const clamped = cieViewportFrame(w, h, coord, z1, rawX0, rawY0, dpr);
   return { zoom: z1, panX: clamped.x0, panY: clamped.y0 };
 }

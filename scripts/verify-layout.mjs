@@ -168,12 +168,12 @@ try {
   );
   check('the toolbar has one button per panel count', layoutBtnCount === 4, `${layoutBtnCount} buttons`);
 
-  for (const [label, expected] of [['2', 2], ['3', 3], ['4', 4], ['1', 1]]) {
-    await page.evaluate((l) => {
+  for (const [layoutKey, expected] of [['pair', 2], ['triple', 3], ['grid', 4], ['single', 1]]) {
+    await page.evaluate((lk) => {
       const root = document.getElementById('video-scopes-host').shadowRoot;
-      const btn = Array.from(root.querySelectorAll('#layouts button')).find((b) => b.textContent === l);
+      const btn = root.querySelector(`#layouts button[data-layout="${lk}"]`);
       btn.click();
-    }, label);
+    }, layoutKey);
     // New cells need fresh WebGPU contexts, so wait for the count rather than a
     // fixed delay.
     await page
@@ -189,23 +189,29 @@ try {
       )
       .catch(() => {});
     await new Promise((r) => setTimeout(r, 400));
-    const got = await page.evaluate(() => {
+    const got = await page.evaluate((lk) => {
       const root = document.getElementById('video-scopes-host').shadowRoot;
       const cells = Array.from(root.querySelectorAll('.cell'));
+      const btn = root.querySelector(`#layouts button[data-layout="${lk}"]`);
+      const iconRects = btn ? btn.querySelectorAll('svg rect').length : 0;
       const pressed = Array.from(root.querySelectorAll('#layouts button'))
         .filter((b) => b.getAttribute('aria-pressed') === 'true')
-        .map((b) => b.textContent);
+        .map((b) => b.dataset.layout);
       // Every cell must have a non-zero box, or the "grid" is only nominal.
       const sized = cells.every((c) => {
         const r = c.getBoundingClientRect();
         return r.width > 40 && r.height > 30;
       });
-      return { count: cells.length, pressed, sized, select: root.getElementById('layout')?.value };
-    });
+      return { count: cells.length, pressed, iconRects, sized, select: root.getElementById('layout')?.value };
+    }, layoutKey);
     check(
-      `the "${label}" button yields ${expected} sized panel(s)`,
-      got.count === expected && got.sized && got.pressed.length === 1 && got.pressed[0] === label,
-      `${got.count} cells, sized=${got.sized}, pressed=${got.pressed.join('|')}, select=${got.select}`,
+      `the "${layoutKey}" icon button (${expected} boxes) yields ${expected} sized panel(s)`,
+      got.count === expected &&
+        got.sized &&
+        got.iconRects === expected &&
+        got.pressed.length === 1 &&
+        got.pressed[0] === layoutKey,
+      `${got.count} cells, iconRects=${got.iconRects}, sized=${got.sized}, pressed=${got.pressed.join('|')}, select=${got.select}`,
     );
   }
 

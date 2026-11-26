@@ -10,7 +10,6 @@ import {
 } from '../core/color/transfer';
 import { cieViewportFrame, frameToScreen } from '../core/color/cie-frame';
 import {
-  insideVectorscopeDisc,
   vectorscopeFrame,
   vectorscopeToScreen,
 } from '../core/color/vectorscope-frame';
@@ -68,6 +67,8 @@ export interface SampleContext {
   videoHeight?: number;
   /** Optional unclamped linear/float RGB [0..1+] from GPU rgba16float readback. */
   floatRgb?: [number, number, number];
+  /** Optional exact normalized [0..1] non-linear PQ/HLG signal RGB from WebGL2 RGBA16F readback. */
+  hdrSignalRgb?: [number, number, number];
 }
 
 function toHexByte(n: number): string {
@@ -96,11 +97,10 @@ export function describeSample(
   const srcTr: EffectiveTransfer = ctx.sourceTransfer ?? 'sdr';
   const sdrWhite = ctx.sdrWhiteNits ?? SDR_DIFFUSE_WHITE_NITS;
 
-  const fn: [number, number, number] = ctx.floatRgb ?? [
-    rgb[0] / 255,
-    rgb[1] / 255,
-    rgb[2] / 255,
-  ];
+  const fn: [number, number, number] =
+    srcTr !== 'sdr' && ctx.hdrSignalRgb
+      ? ctx.hdrSignalRgb
+      : (ctx.floatRgb ?? [rgb[0] / 255, rgb[1] / 255, rgb[2] / 255]);
   const nClamped: [number, number, number] = [
     Math.min(1, Math.max(0, fn[0])),
     Math.min(1, Math.max(0, fn[1])),
@@ -120,7 +120,27 @@ export function describeSample(
   let linRgb: [number, number, number];
   let nits: number;
 
-  if (srcTr !== 'sdr' && ctx.floatRgb) {
+  const hasHdrSignal = srcTr !== 'sdr' && !!ctx.hdrSignalRgb;
+  if (hasHdrSignal) {
+    // True decoded [0..1] non-linear PQ / HLG signal in stream's native primaries (e.g. BT.2020)
+    const [rSig, gSig, bSig] = nClamped;
+    const nR = srcTr === 'pq' ? pqToNits(rSig) : hlgToNits(rSig);
+    const nG = srcTr === 'pq' ? pqToNits(gSig) : hlgToNits(gSig);
+    const nB = srcTr === 'pq' ? pqToNits(bSig) : hlgToNits(bSig);
+    nits = srcTr === 'pq' ? pqToNits(luma) : hlgToNits(luma);
+    linRgb = [nR / sdrWhite, nG / sdrWhite, nB / sdrWhite];
+    if (effTr === 'pq') {
+      axisR = srcTr === 'pq' ? rSig : nitsToPq(nR);
+      axisG = srcTr === 'pq' ? gSig : nitsToPq(nG);
+      axisB = srcTr === 'pq' ? bSig : nitsToPq(nB);
+      axisY = c.kr * axisR + c.kg * axisG + c.kb * axisB;
+    } else if (effTr === 'hlg') {
+      axisR = srcTr === 'hlg' ? rSig : nitsToHlg(nR);
+      axisG = srcTr === 'hlg' ? gSig : nitsToHlg(nG);
+      axisB = srcTr === 'hlg' ? bSig : nitsToHlg(nB);
+      axisY = c.kr * axisR + c.kg * axisG + c.kb * axisB;
+    }
+  } else if (srcTr !== 'sdr' && ctx.floatRgb) {
     // Extended float sRGB from HDR VideoFrame: linear 1.0 = sdrWhite nits
     const lr = Math.max(0, srgbToLinear(fn[0]));
     const lg = Math.max(0, srgbToLinear(fn[1]));
@@ -141,13 +161,13 @@ export function describeSample(
       axisB = nitsToHlg(nB);
       axisY = c.kr * axisR + c.kg * axisG + c.kb * axisB;
     }
-  } else if (effTr === 'pq') {
+  } else if (srcTr === 'sdr' && effTr === 'pq') {
     const nR = pqToNits(axisR);
     const nG = pqToNits(axisG);
     const nB = pqToNits(axisB);
     nits = pqToNits(axisY);
     linRgb = [nR / sdrWhite, nG / sdrWhite, nB / sdrWhite];
-  } else if (effTr === 'hlg') {
+  } else if (srcTr === 'sdr' && effTr === 'hlg') {
     const nR = hlgToNits(axisR);
     const nG = hlgToNits(axisG);
     const nB = hlgToNits(axisB);
@@ -171,18 +191,34 @@ export function describeSample(
   const vh = Math.max(1, ctx.videoHeight ?? 1);
   const ire = luma * 100;
 
+  const codeVals: [number, number, number] = [
+    toCode(nClamped[0]),
+    toCode(nClamped[1]),
+    toCode(nClamped[2]),
+  ];
+  const bounds8 = legalBounds({ limited: range.limited, depth: 8 });
+  const toCode8 = (v: number): number =>
+    Math.round(bounds8.black + (bounds8.white - bounds8.black) * v);
+  const outRgb8: [number, number, number] = hasHdrSignal
+    ? [toCode8(nClamped[0]), toCode8(nClamped[1]), toCode8(nClamped[2])]
+    : rgb;
+  const outRgb10: [number, number, number] =
+    hasHdrSignal && range.depth === 10
+      ? [Math.round(codeVals[0]), Math.round(codeVals[1]), Math.round(codeVals[2])]
+      : [
+          Math.round(nClamped[0] * 1023),
+          Math.round(nClamped[1] * 1023),
+          Math.round(nClamped[2] * 1023),
+        ];
+
   return {
     x,
     y,
     normX: ctx.videoWidth ? Math.min(1, Math.max(0, (x + 0.5) / vw)) : 0.5,
     normY: ctx.videoHeight ? Math.min(1, Math.max(0, (y + 0.5) / vh)) : 0.5,
-    rgb,
-    rgb10: [
-      Math.round(nClamped[0] * 1023),
-      Math.round(nClamped[1] * 1023),
-      Math.round(nClamped[2] * 1023),
-    ],
-    code: [toCode(nClamped[0]), toCode(nClamped[1]), toCode(nClamped[2])],
+    rgb: outRgb8,
+    rgb10: outRgb10,
+    code: codeVals,
     hex: `#${toHexByte(rgb[0])}${toHexByte(rgb[1])}${toHexByte(rgb[2])}`,
     luma,
     cb,
@@ -360,7 +396,9 @@ export class CursorProbeTooltip {
     if (cfg.showLuma) {
       const nitsStr = s.nits >= 100 ? `${Math.round(s.nits)}` : s.nits.toFixed(1);
       if (effTransfer !== 'sdr') {
-        const sigPct = Math.round(s.axisY * 100);
+        const rawPct = s.axisY * 100;
+        const sigPct =
+          Math.abs(rawPct - Math.round(rawPct)) < 0.05 ? String(Math.round(rawPct)) : rawPct.toFixed(1);
         const trTag = effTransfer === 'pq' ? 'PQ' : 'HLG';
         addTextRow(zh ? '亮度' : 'Luma', `${nitsStr} nits (${sigPct}% ${trTag})`, true);
       } else {
@@ -495,8 +533,16 @@ export function drawScopeProbeRings(
 
   if (o.mode === 'vectorscope') {
     const vf = vectorscopeFrame(w, h, zoom, o.panX ?? 0, o.panY ?? 0);
-    const [px, py] = vectorscopeToScreen(vf, sample.cb, sample.cr);
-    if (insideVectorscopeDisc(vf, px, py, 2)) {
+    const sigGain = o.vecScale2x ? 2 : 1;
+    const [px, py] = vectorscopeToScreen(vf, sample.cb * sigGain, sample.cr * sigGain);
+    const ringR = vf.radius * vf.zoom;
+    if (
+      Math.hypot(px - vf.cx, py - vf.cy) <= ringR + 3 &&
+      px >= 3 &&
+      px <= w - 3 &&
+      py >= 3 &&
+      py <= h - 3
+    ) {
       drawRing(ctx, px, py, '#ffdf6b', 6);
     }
     ctx.restore();
@@ -507,7 +553,12 @@ export function drawScopeProbeRings(
     const cf = cieViewportFrame(w, h, o.coord, zoom, o.panX, o.panY, 1);
     const pt = o.coord === 'uv' ? sample.uv : sample.xy;
     const [px, py] = frameToScreen(cf, pt[0], pt[1]);
-    if (px >= 4 && px <= w - 4 && py >= 18 && py <= h - 4) {
+    if (
+      px >= cf.left &&
+      px <= cf.left + cf.width &&
+      py >= cf.top &&
+      py <= cf.top + cf.height
+    ) {
       drawRing(ctx, px, py, '#ffdf6b', 6);
     }
     ctx.restore();
@@ -688,6 +739,184 @@ export interface ProbeRuntimeState {
 }
 
 /**
+ * Ultra-fast (~0.2 ms) 1×1 WebGL2 RGBA16F sampler for hardware-decoded HDR (`PQ` / `HLG`) videos.
+ *
+ * Why needed: Chromium's 2D Canvas (`unorm8`, `toneMapping: 'standard'`) applies display SDR
+ * tone-mapping to HDR videos (turning e.g. a 694-nit / 71.2% PQ patch into `[238, 245, 240]`),
+ * and `'rec2100-pq'` is rejected by 2D Canvas `PredefinedColorSpace`. Uploading the `<video>`
+ * into a WebGL2 `RGBA16F` texture bypasses SDR tone-mapping and gamut conversion completely,
+ * returning the exact `[0..1]` non-linear PQ/HLG `R'G'B'` code values in the stream's native primaries.
+ */
+class HdrWebGl2Sampler {
+  private gl: WebGL2RenderingContext | null = null;
+  private failed = false;
+  private uPtLoc: WebGLUniformLocation | null = null;
+  private srcTex: WebGLTexture | null = null;
+  private fboTex: WebGLTexture | null = null;
+  private fbo: WebGLFramebuffer | null = null;
+  private useFp16Fallback = false;
+  private lastVideo: HTMLVideoElement | null = null;
+  private lastTime = -1;
+  private lastW = 0;
+  private lastH = 0;
+  private readonly outPx = new Float32Array(4);
+
+  private ensureInit(): WebGL2RenderingContext | null {
+    if (this.gl) return this.gl;
+    if (this.failed) return null;
+    try {
+      const surface =
+        typeof OffscreenCanvas !== 'undefined'
+          ? new OffscreenCanvas(1, 1)
+          : (() => {
+              const c = document.createElement('canvas');
+              c.width = 1;
+              c.height = 1;
+              return c;
+            })();
+      const gl = surface.getContext('webgl2', {
+        depth: false,
+        stencil: false,
+        antialias: false,
+        preserveDrawingBuffer: false,
+      }) as WebGL2RenderingContext | null;
+      if (!gl || !gl.getExtension('EXT_color_buffer_float')) {
+        this.failed = true;
+        return null;
+      }
+
+      const vs = gl.createShader(gl.VERTEX_SHADER)!;
+      gl.shaderSource(
+        vs,
+        `#version 300 es
+        void main() {
+          vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0);
+          gl_Position = vec4(p, 0.0, 1.0);
+        }`,
+      );
+      gl.compileShader(vs);
+
+      const fs = gl.createShader(gl.FRAGMENT_SHADER)!;
+      gl.shaderSource(
+        fs,
+        `#version 300 es
+        precision highp float;
+        uniform sampler2D uTex;
+        uniform vec2 uPt;
+        out vec4 outColor;
+        void main() {
+          outColor = texture(uTex, uPt);
+        }`,
+      );
+      gl.compileShader(fs);
+
+      const prog = gl.createProgram()!;
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
+      gl.linkProgram(prog);
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        gl.deleteProgram(prog);
+        this.failed = true;
+        return null;
+      }
+      gl.useProgram(prog);
+      this.uPtLoc = gl.getUniformLocation(prog, 'uPt');
+
+      const srcTex = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, srcTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+      const fboTex = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, fboTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 1, 1, 0, gl.RGBA, gl.FLOAT, null);
+
+      const fbo = gl.createFramebuffer()!;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fboTex, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        gl.bindTexture(gl.TEXTURE_2D, fboTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 1, 1, 0, gl.RGBA, gl.HALF_FLOAT, null);
+        this.useFp16Fallback = true;
+      }
+
+      gl.bindTexture(gl.TEXTURE_2D, srcTex);
+      gl.viewport(0, 0, 1, 1);
+
+      this.srcTex = srcTex;
+      this.fboTex = fboTex;
+      this.fbo = fbo;
+      this.gl = gl;
+      return gl;
+    } catch {
+      this.failed = true;
+      return null;
+    }
+  }
+
+  sample(video: HTMLVideoElement, x: number, y: number): [number, number, number] | undefined {
+    const gl = this.ensureInit();
+    if (!gl || !this.srcTex || !this.fbo) return undefined;
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (vw <= 0 || vh <= 0) return undefined;
+    try {
+      gl.bindTexture(gl.TEXTURE_2D, this.srcTex);
+      const needUpload =
+        video !== this.lastVideo ||
+        vw !== this.lastW ||
+        vh !== this.lastH ||
+        !video.paused ||
+        Math.abs(video.currentTime - this.lastTime) > 1e-5;
+      if (needUpload) {
+        if (!this.useFp16Fallback) {
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, gl.RGBA, gl.FLOAT, video);
+          if (gl.getError() !== gl.NO_ERROR) {
+            this.useFp16Fallback = true;
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, video);
+          }
+        } else {
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, video);
+        }
+        this.lastVideo = video;
+        this.lastTime = video.currentTime;
+        this.lastW = vw;
+        this.lastH = vh;
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+      gl.uniform2f(this.uPtLoc, (x + 0.5) / vw, (y + 0.5) / vh);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, this.outPx);
+      if (gl.getError() !== gl.NO_ERROR) return undefined;
+      return [this.outPx[0]!, this.outPx[1]!, this.outPx[2]!];
+    } catch {
+      return undefined;
+    }
+  }
+
+  destroy(): void {
+    if (!this.gl) return;
+    try {
+      if (this.fbo) this.gl.deleteFramebuffer(this.fbo);
+      if (this.fboTex) this.gl.deleteTexture(this.fboTex);
+      if (this.srcTex) this.gl.deleteTexture(this.srcTex);
+      this.gl.getExtension('WEBGL_lose_context')?.loseContext();
+    } catch {
+      // Ignore cleanup errors
+    }
+    this.gl = null;
+    this.srcTex = null;
+    this.fboTex = null;
+    this.fbo = null;
+    this.lastVideo = null;
+  }
+}
+
+/**
  * Samples the pixel under the mouse cursor across the rendered `<video>` box.
  * Works through player control overlays and false-color overlays via window-level
  * capture listeners, activating when `eyedropperEnabled` is ON or `Alt` is held.
@@ -695,8 +924,7 @@ export interface ProbeRuntimeState {
 export class Probe {
   private readonly canvas = document.createElement('canvas');
   private readonly ctx: CanvasRenderingContext2D | null;
-  private pqCanvas: HTMLCanvasElement | null = null;
-  private pqCtx: CanvasRenderingContext2D | null | undefined = undefined;
+  private hdrSampler: HdrWebGl2Sampler | null = null;
   private video: HTMLVideoElement | null = null;
   private active = false;
   private lastEmit = 0;
@@ -733,8 +961,14 @@ export class Probe {
       this.restoreVideoCursor();
       this.video = null;
     }
-    if (!this.active) return;
+    if (!this.active) {
+      this.hdrSampler?.destroy();
+      this.hdrSampler = null;
+      return;
+    }
     this.active = false;
+    this.hdrSampler?.destroy();
+    this.hdrSampler = null;
     window.removeEventListener('pointermove', this.handleMove, true);
     window.removeEventListener('scroll', this.handleScroll, true);
     document.removeEventListener('mouseleave', this.handleClear);
@@ -856,36 +1090,12 @@ export class Probe {
       this.ctx.drawImage(video, x, y, 1, 1, 0, 0, 1, 1);
       const d = this.ctx.getImageData(0, 0, 1, 1).data;
 
-      // For true HDR VideoFrames on Chromium, sample via a rec2100-pq 2D canvas when supported
-      // so getImageData preserves true >203-nit HDR highlights instead of SDR tone-mapping!
-      let hdrFloatRgb: [number, number, number] | undefined;
+      // For hardware-decoded HDR videos (`PQ` / `HLG`), sample the exact un-tonemapped
+      // [0..1] PQ/HLG R'G'B' signal via WebGL2 RGBA16F instead of 2D Canvas SDR tone-mapping!
+      let hdrSignalRgb: [number, number, number] | undefined;
       if (st.sourceTransfer !== 'sdr') {
-        if (this.pqCtx === undefined) {
-          try {
-            this.pqCanvas = document.createElement('canvas');
-            this.pqCanvas.width = 1;
-            this.pqCanvas.height = 1;
-            this.pqCtx = this.pqCanvas.getContext('2d', {
-              colorSpace: 'rec2100-pq' as PredefinedColorSpace,
-              willReadFrequently: true,
-            });
-          } catch {
-            this.pqCtx = null;
-          }
-        }
-        if (this.pqCtx) {
-          this.pqCtx.drawImage(video, x, y, 1, 1, 0, 0, 1, 1);
-          const pq = this.pqCtx.getImageData(0, 0, 1, 1).data;
-          const sdrW = st.sdrWhiteNits || SDR_DIFFUSE_WHITE_NITS;
-          // Convert true PQ nits into linear extended-sRGB units (1.0 = sdrWhiteNits)
-          const linR = pqToNits(pq[0]! / 255) / sdrW;
-          const linG = pqToNits(pq[1]! / 255) / sdrW;
-          const linB = pqToNits(pq[2]! / 255) / sdrW;
-          // Pass via floatRgb using linear->extended-srgb encoding expected by srgbToLinear
-          const toExtSrgb = (l: number): number =>
-            l <= 0.0031308 ? l * 12.92 : 1.055 * Math.pow(l, 1 / 2.4) - 0.055;
-          hdrFloatRgb = [toExtSrgb(linR), toExtSrgb(linG), toExtSrgb(linB)];
-        }
+        this.hdrSampler ??= new HdrWebGl2Sampler();
+        hdrSignalRgb = this.hdrSampler.sample(video, x, y);
       }
 
       const sample = describeSample([d[0]!, d[1]!, d[2]!], x, y, st.matrix, st.range, {
@@ -895,7 +1105,7 @@ export class Probe {
         sdrWhiteNits: st.sdrWhiteNits,
         videoWidth: video.videoWidth,
         videoHeight: video.videoHeight,
-        floatRgb: hdrFloatRgb,
+        hdrSignalRgb,
       });
       this.onSample(sample, clientX, clientY);
     } catch {

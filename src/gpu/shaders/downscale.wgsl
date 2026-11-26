@@ -46,7 +46,26 @@ fn recoverSignalRgb(rgb: vec3f, mode: u32) -> vec3f {
       pow(max(lin.b, 0.0), invGamma),
     );
   }
-  return vec3f(linearToBt709Itu(lin.r), linearToBt709Itu(lin.g), linearToBt709Itu(lin.b));
+  if (mode == 2u) {
+    return vec3f(linearToBt709Itu(lin.r), linearToBt709Itu(lin.g), linearToBt709Itu(lin.b));
+  }
+  if (mode == 3u) {
+    let e2020 = vec3f(
+      0.6274039 * lin.r + 0.3292830 * lin.g + 0.0433131 * lin.b,
+      0.0690973 * lin.r + 0.9195404 * lin.g + 0.0113623 * lin.b,
+      0.0163914 * lin.r + 0.0880133 * lin.g + 0.8955953 * lin.b,
+    );
+    return clamp(e2020, vec3f(0.0), vec3f(1.0));
+  }
+  if (mode == 4u) {
+    let ep3 = vec3f(
+      0.8224620 * lin.r + 0.1775380 * lin.g,
+      0.0331942 * lin.r + 0.9668058 * lin.g,
+      0.0170826 * lin.r + 0.0723974 * lin.g + 0.9105200 * lin.b,
+    );
+    return clamp(ep3, vec3f(0.0), vec3f(1.0));
+  }
+  return clamp(lin, vec3f(0.0), vec3f(1.0));
 }
 
 // uv spans the whole source, and analysisSize preserves aspect ratio, so a

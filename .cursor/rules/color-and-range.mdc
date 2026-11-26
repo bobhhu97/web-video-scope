@@ -1,0 +1,68 @@
+---
+description: 视频示波器的色彩数学、码值轴、range 诊断与 HDR 分区规则。改 scope/刻度/色彩时必须遵守。
+globs: src/core/**/*.ts,src/gpu/shaders/**,src/ui/graticule.ts,src/ui/probe.ts
+alwaysApply: false
+---
+
+# 色彩、码值轴与 Range
+
+## 一、只有一根轴
+
+纵向统一用**码值空间** `a = code / maxCode`（8-bit 除以 255，10-bit 除以 1023）。
+`IRE / code8 / code10 / mV / nits / hlg` 只是同一根轴上的不同标尺：
+
+```
+IRE(a)  = (a·maxCode - black) / (white - black) · 100
+code8   = a·255        code10 = a·1023        mV = IRE/100·700
+```
+
+**切单位不允许移动 trace，只有标签变。** 由 `tests/units.test.ts` 与 `tests/quantize.test.ts` 锁住。
+
+推论：Limited 信号的黑位落在 `16/255 = 6.27%` 高度而不是贴底，footroom/headroom 成为轴上真实的可视带。
+这是正确性判据，看到"黑位没贴底"不要去"修"。
+
+## 二、Range 判定
+
+顺序固定，不要颠倒：
+
+1. `new VideoFrame(video).colorSpace` 的 `fullRange` 元数据（权威，`confidence: 1`）
+2. 无元数据才用直方图启发式：`P0.1 ∈ [0.045, 0.085]` 且 `P99.9 ∈ [0.90, 0.94]` → 像 limited
+3. 同一结论**连续 3 帧**才锁定告警，避免闪黑帧误报
+4. 用户 `rangeMode` 覆盖优先于一切
+
+**`sanitizeRangeDiagnosis()` 不可绕过**：display 模式下 Chrome 已把 limited 展开到 `0..1`，
+`full-treated-as-limited` 必须被抑制，否则屏幕上永远挂一条假警告。raw 模式下才允许它出现。
+
+## 三、display 路径的平台差异（改采样前必读）
+
+Dawn 会把 external texture 重新编码成 sRGB 再交给 shader，具体编码随平台不同：
+macOS/iOS 是 `BT709_APPLE`（gamma 1.9609375）、Windows/Linux 是 BT.709 OETF；
+HDR 还会先套 BT.2020→sRGB 或 P3→sRGB 矩阵，且**不执行** PQ/HLG EOTF。
+
+`src/core/color/transfer.ts` 的 `DisplayTransferFix`（0..5）与 `recoverSignalRgbFromWebGpu()`
+就是逆这个过程。`tests/hdr-dawn-recovery.test.ts` 里有实测数值（例如 PQ 694 nits / 10-bit code 688），
+改这段之前先读它，改完必须让它仍然通过。
+
+## 四、HDR 分区
+
+阈值由 `resolveHdrZoneThresholds(nitLow, nitHigh, sdrWhiteNits)` 决定：
+
+- SDR 参考白（默认 203n，ITU-R BT.2408）**严格位于** `nitLow+8 .. nitHigh-15` 之间 → 4 区
+  （`<100n` 蓝/青 · `100–203n` 绿 · `203–1000n` 黄 · `>1000n` 红）
+- 否则 → 3 区（`≤203n` 绿 · `203–1000n` 黄 · `>1000n` 红）
+
+改分区颜色要**同时**改三处，否则图例与画面会不一致：
+`shaders/resolve.wgsl` 的 `hdrZoneColorFromAxis` → `ui/false-color-overlay.ts` 的 `legendItems`
+→ `ui/graticule.ts` 的色带绘制，并由 `tests/hdr-multi-zone-coloring.test.ts` 对照。
+
+`nits` 轴在 SDR 内容上是"参考刻度"而非绝对亮度测量。`nitsToAxisForTransfer()` 对 SDR 走的是
+`nits/sdrWhiteNits` → sRGB OETF → 码值轴，因此 `sdrWhiteNits`（默认 203）正好落在合法白（100 IRE），
+superwhite 继续向轴顶延伸而**不**塌到 100 IRE。对 PQ / HLG 则直接用对应 EOTF 换算。
+
+## 五、shader 与 CPU 必须同号
+
+`accumulate.wgsl` 的 `accMode` 与 `resolve.wgsl` 的 `mode` 编号一致：
+`0=waveform 1=parade 2=vectorscope 3=cie 4=histogram`。`scope-renderer.ts` 的 `ACC_MODE` / `RES_MODE`
+是这两个表在 TS 侧的镜像。新增模式时三处一起改，且 `accChannel()` 的子模式编号也要对齐。
+
+`src/core/scopes/reference.ts` 是 GPU 密度累加的 CPU oracle，索引约定必须与 shader 完全一致。

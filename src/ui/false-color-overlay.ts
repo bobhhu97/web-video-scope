@@ -1,7 +1,7 @@
 import { LUMA, type MatrixId } from '../core/color/matrices';
 import type { DisplayTransferFix } from '../core/color/transfer';
 import { axisMapping, type RangeSpec } from '../core/scale/quantize';
-import type { EffectiveTransfer } from '../core/scale/units';
+import { resolveHdrZoneThresholds, type EffectiveTransfer } from '../core/scale/units';
 import {
   isPopoverOpen,
   placeTopLayerOverlayHost,
@@ -64,10 +64,8 @@ function presetCode(p: Exclude<FalseColorPreset, 'auto'>): number {
   return 0; // 'arri'
 }
 
-function legendItems(cfg: FalseColorConfig): { title: string; badges: Array<[string, string]> } {
+export function legendItems(cfg: FalseColorConfig): { title: string; badges: Array<[string, string]> } {
   const zh = cfg.lang === 'zh';
-  const nitLow = Math.round(cfg.nitLow);
-  const nitHigh = Math.round(cfg.nitHigh);
   const effPreset = resolveFcPreset(cfg);
 
   switch (effPreset) {
@@ -108,15 +106,31 @@ function legendItems(cfg: FalseColorConfig): { title: string; badges: Array<[str
           ['#ef4444', '100 IRE'],
         ],
       };
-    case 'hdr-nits':
+    case 'hdr-nits': {
+      const zones = resolveHdrZoneThresholds(cfg.nitLow, cfg.nitHigh, cfg.sdrWhiteNits ?? 203);
+      const lo = Math.round(zones.nitLow);
+      const hi = Math.round(zones.nitHigh);
+      if (zones.nitRef !== null) {
+        const ref = Math.round(zones.nitRef);
+        return {
+          title: 'HDR',
+          badges: [
+            ['#38bdf8', `■ <${lo}n`],
+            ['#34d399', `■ ${lo}–${ref}n`],
+            ['#facc15', `■ ${ref}–${hi}n`],
+            ['#ef4444', `■ >${hi}n ${zh ? '峰值' : 'Peak'}`],
+          ],
+        };
+      }
       return {
         title: 'HDR',
         badges: [
-          ['#38bdf8', `■ <${nitLow}n`],
-          ['#5cd68d', `■ ${nitLow}–${nitHigh}n`],
-          ['#fb7185', `■ >${nitHigh}n ${zh ? '峰值' : 'Peak'}`],
+          ['#34d399', `■ ≤${lo}n`],
+          ['#facc15', `■ ${lo}–${hi}n`],
+          ['#ef4444', `■ >${hi}n ${zh ? '峰值' : 'Peak'}`],
         ],
       };
+    }
   }
 }
 
@@ -487,7 +501,8 @@ export class FalseColorOverlay {
     const effPreset = resolveFcPreset(cfg);
     if (this.legend) {
       this.legend.style.display = cfg.showLegend !== false ? 'flex' : 'none';
-      const legendKey = `${effPreset}:${nitLow}:${nitHigh}:${cfg.lang}:${cfg.showLegend}`;
+      const sdrW = Math.round(cfg.sdrWhiteNits ?? 203);
+      const legendKey = `${effPreset}:${nitLow}:${sdrW}:${nitHigh}:${cfg.lang}:${cfg.showLegend}`;
       if (legendKey !== this.lastLegendKey) {
         this.lastLegendKey = legendKey;
         renderLegendDom(this.legend, cfg);

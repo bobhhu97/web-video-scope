@@ -1,5 +1,5 @@
 {
-  "when": "2026-11-26T06:59:59.565Z",
+  "when": "2026-11-26T07:37:09.273Z",
   "results": [
     {
       "name": "host page has a playing video with metadata",
@@ -64,7 +64,7 @@
     {
       "name": "analysis reaches a steady frame rate near the source ceiling",
       "ok": true,
-      "detail": "60fps 2.5ms 0copy 474p"
+      "detail": "30fps 3.6ms 0copy 474p"
     },
     {
       "name": "state persists visible=true to chrome.storage",
@@ -96,7 +96,7 @@
     {
       "name": "raw mode keeps a usable frame rate",
       "ok": true,
-      "detail": "60fps 1.5ms raw 474p"
+      "detail": "60fps 2.4ms raw 474p"
     },
     {
       "name": "Alt + pointer reports a pixel reading",

@@ -8,6 +8,7 @@ import {
   legalBands,
   nitsToAxisForTransfer,
   resolveEffectiveUnit,
+  resolveHdrZoneThresholds,
   tickValues,
   unitSuffix,
 } from '../core/scale/units';
@@ -19,7 +20,6 @@ import {
   type CieFrame,
 } from '../core/color/cie-frame';
 import {
-  insideVectorscopeDisc,
   vectorscopeFrame,
   vectorscopeToScreen,
 } from '../core/color/vectorscope-frame';
@@ -32,10 +32,13 @@ const GRID_MAJOR = '#33414d';
 const LEGAL = '#5d7f93';
 const BAND = 'rgba(255,255,255,0.035)';
 const TEXT = '#7d8b96';
-const HDR_REF_WHITE_COLOR = '#6ec8e8';
+const HDR_REF_WHITE_COLOR = '#facc15';
 const NIT_LOW_COLOR = '#38bdf8';
-const NIT_HIGH_COLOR = '#fb923c';
-const NIT_PEAK_BAND = 'rgba(251, 113, 133, 0.075)';
+const NIT_WARN_COLOR = '#facc15';
+const NIT_HIGH_COLOR = '#f87171';
+const NIT_PEAK_BAND = 'rgba(239, 68, 68, 0.085)';
+const NIT_WARN_BAND = 'rgba(250, 204, 21, 0.06)';
+const NIT_SDR_BAND = 'rgba(52, 211, 153, 0.035)';
 const NIT_SHADOW_BAND = 'rgba(56, 189, 248, 0.045)';
 
 export function axisToCanvasY(
@@ -94,37 +97,61 @@ function drawHdrThresholdLinesY(
   const showZones = o.traceMode === 'hdr-zones' || isHdrScale;
   if (!showZones) return;
 
-  const nitLow = Math.max(0.01, o.nitLow ?? 100);
-  const nitHigh = Math.max(nitLow + 1, o.nitHigh ?? 1000);
-  const axisLow = nitsToAxisForTransfer(nitLow, effTransfer, o.range);
-  const axisHigh = nitsToAxisForTransfer(nitHigh, effTransfer, o.range);
+  const sdrWhite = o.sdrWhiteNits ?? SDR_DIFFUSE_WHITE_NITS;
+  const zones = resolveHdrZoneThresholds(o.nitLow ?? 100, o.nitHigh ?? 1000, sdrWhite);
+  const nitLow = zones.nitLow;
+  const nitHigh = zones.nitHigh;
+  const axisLow = nitsToAxisForTransfer(nitLow, effTransfer, o.range, sdrWhite);
+  const axisRef =
+    zones.nitRef !== null ? nitsToAxisForTransfer(zones.nitRef, effTransfer, o.range, sdrWhite) : null;
+  const axisHigh = nitsToAxisForTransfer(nitHigh, effTransfer, o.range, sdrWhite);
+  const axisWarnStart = axisRef ?? axisLow;
 
-  // Shade peak exceedance region (> nitHigh) and deep shadow region (< nitLow) when HDR zones active
+  const yLow = axisToCanvasY(axisLow, plotTop, plotH, zoom, panY);
+  const yWarn = axisToCanvasY(axisWarnStart, plotTop, plotH, zoom, panY);
+  const yHigh = axisToCanvasY(axisHigh, plotTop, plotH, zoom, panY);
+  const plotBottom = plotTop + plotH;
+
+  // Shade 3–4 luminance zones when HDR zones active (or peak warning band on HDR scales)
   if (o.traceMode === 'hdr-zones' || isHdrScale) {
-    const yHigh = axisToCanvasY(axisHigh, plotTop, plotH, zoom, panY);
     if (yHigh > plotTop + 1) {
       ctx.fillStyle = NIT_PEAK_BAND;
       ctx.fillRect(plotLeft, plotTop, plotW, Math.min(plotH, yHigh - plotTop));
     }
     if (o.traceMode === 'hdr-zones') {
-      const yLow = axisToCanvasY(axisLow, plotTop, plotH, zoom, panY);
-      if (yLow < plotTop + plotH - 1) {
-        ctx.fillStyle = NIT_SHADOW_BAND;
-        ctx.fillRect(plotLeft, Math.max(plotTop, yLow), plotW, plotTop + plotH - Math.max(plotTop, yLow));
+      const warnTop = Math.max(plotTop, yHigh);
+      const warnBot = Math.min(plotBottom, yWarn);
+      if (warnBot - warnTop > 1) {
+        ctx.fillStyle = NIT_WARN_BAND;
+        ctx.fillRect(plotLeft, warnTop, plotW, warnBot - warnTop);
+      }
+      if (axisRef !== null) {
+        const sdrTop = Math.max(plotTop, yWarn);
+        const sdrBot = Math.min(plotBottom, yLow);
+        if (sdrBot - sdrTop > 1) {
+          ctx.fillStyle = NIT_SDR_BAND;
+          ctx.fillRect(plotLeft, sdrTop, plotW, sdrBot - sdrTop);
+        }
+        if (yLow < plotBottom - 1) {
+          ctx.fillStyle = NIT_SHADOW_BAND;
+          ctx.fillRect(plotLeft, Math.max(plotTop, yLow), plotW, plotBottom - Math.max(plotTop, yLow));
+        }
+      } else if (yLow < plotBottom - 1) {
+        ctx.fillStyle = NIT_SDR_BAND;
+        ctx.fillRect(plotLeft, Math.max(plotTop, yLow), plotW, plotBottom - Math.max(plotTop, yLow));
       }
     }
   }
 
-  // ITU-R BT.2408 203 nits Reference White line (when not identical to nitLow/nitHigh)
-  if (isHdrScale && Math.abs(nitLow - SDR_DIFFUSE_WHITE_NITS) > 8 && Math.abs(nitHigh - SDR_DIFFUSE_WHITE_NITS) > 15) {
-    const axisRef = nitsToAxisForTransfer(SDR_DIFFUSE_WHITE_NITS, effTransfer, o.range);
+  // ITU-R BT.2408 SDR Reference White (e.g. 203 nits) line — marks start of Yellow HDR headroom in 4-zone mode
+  if (axisRef !== null && (o.traceMode === 'hdr-zones' || isHdrScale)) {
     const relRef = (axisRef - panY) * zoom;
     if (relRef >= 0 && relRef <= 1) {
       const yRef = axisToCanvasY(axisRef, plotTop, plotH, zoom, panY);
       ctx.save();
       ctx.strokeStyle = HDR_REF_WHITE_COLOR;
-      ctx.globalAlpha = 0.55;
-      ctx.setLineDash([2, 3]);
+      ctx.globalAlpha = o.traceMode === 'hdr-zones' ? 0.85 : 0.55;
+      ctx.setLineDash([3, 3]);
       ctx.beginPath();
       ctx.moveTo(plotLeft, yRef);
       ctx.lineTo(plotLeft + plotW, yRef);
@@ -133,26 +160,36 @@ function drawHdrThresholdLinesY(
     }
   }
 
-  // User Low-Nit & High-Nit threshold lines + right-side callout tags
-  const thresholds: { axis: number; nits: number; color: string; tag: string }[] = [
-    { axis: axisLow, nits: nitLow, color: NIT_LOW_COLOR, tag: formatNitBadge(nitLow) },
+  // Threshold lines + right-side callout tags (Cyan <low, Yellow >203n headroom, Red >peak)
+  const lowLineColor = axisRef === null ? NIT_WARN_COLOR : NIT_LOW_COLOR;
+  const thresholds: { axis: number; nits: number; color: string; tag: string; optional?: boolean }[] = [
+    { axis: axisLow, nits: nitLow, color: lowLineColor, tag: formatNitBadge(nitLow) },
+    ...(axisRef !== null && zones.nitRef !== null && o.traceMode === 'hdr-zones'
+      ? [{ axis: axisRef, nits: zones.nitRef, color: NIT_WARN_COLOR, tag: formatNitBadge(zones.nitRef), optional: true }]
+      : []),
     { axis: axisHigh, nits: nitHigh, color: NIT_HIGH_COLOR, tag: `>${formatNitBadge(nitHigh)}` },
   ];
 
   ctx.save();
   ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+  const placedYs: number[] = [];
   for (const t of thresholds) {
     const rel = (t.axis - panY) * zoom;
     if (rel < -0.005 || rel > 1.005) continue;
     const y = axisToCanvasY(t.axis, plotTop, plotH, zoom, panY);
-    ctx.strokeStyle = t.color;
-    ctx.lineWidth = 1;
-    ctx.setLineDash([5, 3]);
-    ctx.beginPath();
-    ctx.moveTo(plotLeft, y);
-    ctx.lineTo(plotLeft + plotW, y);
-    ctx.stroke();
-    ctx.setLineDash([]);
+    if (!t.optional) {
+      ctx.strokeStyle = t.color;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 3]);
+      ctx.beginPath();
+      ctx.moveTo(plotLeft, y);
+      ctx.lineTo(plotLeft + plotW, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    if (t.optional && placedYs.some((py) => Math.abs(py - y) < 13)) continue;
+    placedYs.push(y);
 
     const labelW = ctx.measureText(t.tag).width + 6;
     const bx = plotLeft + plotW - labelW - 3;
@@ -371,23 +408,59 @@ export function drawHistogramGraticule(ctx: CanvasRenderingContext2D, o: ScopeOp
     ctx.fillText(formatTickLabel(a, effUnit, o.range), x, plotTop + plotH + 4);
   }
 
-  // Dual-Nit threshold vertical lines + peak zone band on Histogram
+  // 3–4 Zone HDR Nit threshold vertical lines + zone bands on Histogram
   if (o.traceMode === 'hdr-zones' || isHdrScale) {
-    const nitLow = Math.max(0.01, o.nitLow ?? 100);
-    const nitHigh = Math.max(nitLow + 1, o.nitHigh ?? 1000);
-    const axisLow = nitsToAxisForTransfer(nitLow, effTransfer, o.range);
-    const axisHigh = nitsToAxisForTransfer(nitHigh, effTransfer, o.range);
+    const sdrWhite = o.sdrWhiteNits ?? SDR_DIFFUSE_WHITE_NITS;
+    const zones = resolveHdrZoneThresholds(o.nitLow ?? 100, o.nitHigh ?? 1000, sdrWhite);
+    const axisLow = nitsToAxisForTransfer(zones.nitLow, effTransfer, o.range, sdrWhite);
+    const axisRef =
+      zones.nitRef !== null ? nitsToAxisForTransfer(zones.nitRef, effTransfer, o.range, sdrWhite) : null;
+    const axisHigh = nitsToAxisForTransfer(zones.nitHigh, effTransfer, o.range, sdrWhite);
+    const axisWarnStart = axisRef ?? axisLow;
 
+    const xLow = axisToCanvasX(axisLow, plotLeft, plotW, zoom, panX);
+    const xWarn = axisToCanvasX(axisWarnStart, plotLeft, plotW, zoom, panX);
     const xHigh = axisToCanvasX(axisHigh, plotLeft, plotW, zoom, panX);
-    if (xHigh < plotLeft + plotW - 1) {
+    const plotRight = plotLeft + plotW;
+
+    if (xHigh < plotRight - 1) {
       ctx.fillStyle = NIT_PEAK_BAND;
-      ctx.fillRect(Math.max(plotLeft, xHigh), plotTop, plotLeft + plotW - Math.max(plotLeft, xHigh), plotH);
+      ctx.fillRect(Math.max(plotLeft, xHigh), plotTop, plotRight - Math.max(plotLeft, xHigh), plotH);
+    }
+    if (o.traceMode === 'hdr-zones') {
+      const warnL = Math.max(plotLeft, xWarn);
+      const warnR = Math.min(plotRight, xHigh);
+      if (warnR - warnL > 1) {
+        ctx.fillStyle = NIT_WARN_BAND;
+        ctx.fillRect(warnL, plotTop, warnR - warnL, plotH);
+      }
+      if (axisRef !== null) {
+        const sdrL = Math.max(plotLeft, xLow);
+        const sdrR = Math.min(plotRight, xWarn);
+        if (sdrR - sdrL > 1) {
+          ctx.fillStyle = NIT_SDR_BAND;
+          ctx.fillRect(sdrL, plotTop, sdrR - sdrL, plotH);
+        }
+        if (xLow > plotLeft + 1) {
+          ctx.fillStyle = NIT_SHADOW_BAND;
+          ctx.fillRect(plotLeft, plotTop, Math.min(plotRight, xLow) - plotLeft, plotH);
+        }
+      } else if (xLow > plotLeft + 1) {
+        ctx.fillStyle = NIT_SDR_BAND;
+        ctx.fillRect(plotLeft, plotTop, Math.min(plotRight, xLow) - plotLeft, plotH);
+      }
     }
 
-    for (const t of [
-      { axis: axisLow, color: NIT_LOW_COLOR, tag: formatNitBadge(nitLow) },
-      { axis: axisHigh, color: NIT_HIGH_COLOR, tag: `>${formatNitBadge(nitHigh)}` },
-    ]) {
+    const lowLineColor = axisRef === null ? NIT_WARN_COLOR : NIT_LOW_COLOR;
+    const vLines: { axis: number; color: string; tag: string; showTag: boolean }[] = [
+      { axis: axisLow, color: lowLineColor, tag: formatNitBadge(zones.nitLow), showTag: true },
+      ...(axisRef !== null && zones.nitRef !== null
+        ? [{ axis: axisRef, color: NIT_WARN_COLOR, tag: formatNitBadge(zones.nitRef), showTag: o.traceMode === 'hdr-zones' }]
+        : []),
+      { axis: axisHigh, color: NIT_HIGH_COLOR, tag: `>${formatNitBadge(zones.nitHigh)}`, showTag: true },
+    ];
+
+    for (const t of vLines) {
       const rel = (t.axis - panX) * zoom;
       if (rel < 0 || rel > 1) continue;
       const x = axisToCanvasX(t.axis, plotLeft, plotW, zoom, panX);
@@ -399,9 +472,11 @@ export function drawHistogramGraticule(ctx: CanvasRenderingContext2D, o: ScopeOp
       ctx.lineTo(x, plotTop + plotH);
       ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = t.color;
-      ctx.textAlign = x > plotLeft + plotW - 36 ? 'right' : 'left';
-      ctx.fillText(t.tag, x + (x > plotLeft + plotW - 36 ? -3 : 3), plotTop + 3);
+      if (t.showTag) {
+        ctx.fillStyle = t.color;
+        ctx.textAlign = x > plotRight - 36 ? 'right' : 'left';
+        ctx.fillText(t.tag, x + (x > plotRight - 36 ? -3 : 3), plotTop + 3);
+      }
       ctx.restore();
     }
   }
@@ -476,30 +551,34 @@ export function drawVectorscopeGraticule(ctx: CanvasRenderingContext2D, o: Scope
   const w = o.width;
   const h = o.height;
   const frame = vectorscopeFrame(w, h, o.zoom, o.panX ?? 0, o.panY ?? 0);
-  const { cx, cy, discCx, discCy, radius } = frame;
+  const { cx, cy, radius } = frame;
+  const ringR = radius * frame.zoom;
 
   ctx.clearRect(0, 0, w, h);
 
-  // Stationary outer bezel circle
-  ctx.strokeStyle = GRID_MAJOR;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.arc(discCx, discCy, radius, 0, Math.PI * 2);
-  ctx.stroke();
-
-  // Clip inner panned/zoomed rings, crosshairs, targets, and skin line to the disc
+  // Clip panned/zoomed rings, crosshairs, targets, and skin line to the rectangular cell canvas
+  // so the outermost ring zooms outward naturally with the rest of the vectorscope!
   ctx.save();
   ctx.beginPath();
-  ctx.arc(discCx, discCy, radius, 0, Math.PI * 2);
+  ctx.rect(0, 0, w, h);
   ctx.clip();
 
-  ctx.strokeStyle = GRID_MAJOR;
-  const ringR = radius * frame.zoom;
-  for (const frac of [0.25, 0.5, 0.75, 1]) {
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = GRID;
+  for (const frac of [0.25, 0.5, 0.75]) {
     ctx.beginPath();
     ctx.arc(cx, cy, ringR * frac, 0, Math.PI * 2);
     ctx.stroke();
   }
+
+  // Outermost vectorscope circle scales smoothly with frame.zoom
+  ctx.strokeStyle = GRID_MAJOR;
+  ctx.lineWidth = 1.15;
+  ctx.beginPath();
+  ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(cx, cy - ringR);
   ctx.lineTo(cx, cy + ringR);
@@ -514,22 +593,22 @@ export function drawVectorscopeGraticule(ctx: CanvasRenderingContext2D, o: Scope
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
+  const boxSize = Math.max(7, Math.min(18, radius * Math.min(1.5, Math.sqrt(frame.zoom)) * 0.11));
   for (const t of chromaTargets(c, primaryLevel)) {
     const [px, py] = vectorscopeToScreen(frame, t.cb, t.cr);
-    if (!insideVectorscopeDisc(frame, px, py, 12)) continue;
-    const s = Math.max(7, Math.min(15, radius * 0.11));
+    if (px < -20 || px > w + 20 || py < -20 || py > h + 20) continue;
     const accent = TARGET_ACCENT[t.name] ?? '#b8c7d4';
     ctx.strokeStyle = accent;
-    drawTargetBrackets(ctx, px, py, s);
+    drawTargetBrackets(ctx, px, py, boxSize);
 
     const dx = px - cx;
     const dy = py - cy;
     const len = Math.max(1e-3, Math.hypot(dx, dy));
     const tx = -dy / len;
     const ty = dx / len;
-    const lx = px + tx * (s / 2 + 6);
-    const ly = py + ty * (s / 2 + 6);
-    if (insideVectorscopeDisc(frame, lx, ly, 2)) {
+    const lx = px + tx * (boxSize / 2 + 6);
+    const ly = py + ty * (boxSize / 2 + 6);
+    if (lx >= 5 && lx <= w - 5 && ly >= 6 && ly <= h - 5) {
       ctx.fillStyle = accent;
       ctx.fillText(t.name[0]!.toUpperCase(), lx, ly);
     }
@@ -548,16 +627,20 @@ export function drawVectorscopeGraticule(ctx: CanvasRenderingContext2D, o: Scope
 
   ctx.restore();
 
-  ctx.fillStyle = TEXT;
   ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
+  const sigTag = o.vecScale2x ? ' · 2×Sig' : '';
+  const zoomTag = frame.zoom > 1.01 ? ` · ${+frame.zoom.toFixed(1)}x` : '';
   const toneTag = o.toneFilter && o.toneFilter !== 'all' ? ` · ${o.toneFilter}` : '';
-  ctx.fillText(
-    `${o.matrix.toUpperCase()} · ${Math.round(primaryLevel * 100)}% · ${+(o.zoom || 1).toFixed(1)}x${toneTag}`,
-    8,
-    12,
-  );
+  const statusText = `${o.matrix.toUpperCase()} · ${Math.round(primaryLevel * 100)}%${sigTag}${zoomTag}${toneTag}`;
+  if (frame.zoom > 1.01) {
+    const tw = ctx.measureText(statusText).width;
+    ctx.fillStyle = 'rgba(10, 14, 20, 0.78)';
+    ctx.fillRect(5, 4, tw + 6, 15);
+  }
+  ctx.fillStyle = TEXT;
+  ctx.fillText(statusText, 8, 12);
 }
 
 export function xyToUv(x: number, y: number): [number, number] {
@@ -673,9 +756,10 @@ export function drawCieGraticule(
   const pts = smoothOpenSpline(screen, locusSubdivisions(screen));
 
   ctx.save();
-  // Clip locus & triangles away from the top header strip (0..20px) when zoomed in
+  // Clip locus, gamut triangles, and white-point crosshair strictly to the plot frame
+  // so they stay 100% aligned inside the coordinate grid box and never cross axis labels!
   ctx.beginPath();
-  ctx.rect(0, Math.min(20, frame.top - 2), w, Math.max(1, h - Math.min(20, frame.top - 2)));
+  ctx.rect(frame.left, frame.top, frame.width, frame.height);
   ctx.clip();
 
   ctx.beginPath();
@@ -783,54 +867,67 @@ function drawCieAxes(
 ): void {
   const spanX = frame.x1 - frame.x0;
   const spanY = frame.y1 - frame.y0;
+  const minSpan = Math.min(spanX, spanY);
   const stepFor = (span: number): number => {
     for (const s of [0.2, 0.1, 0.05, 0.02, 0.01, 0.005]) {
-      if (span / s <= 8) return s;
+      if (span / s <= 6) return s;
     }
     return 0.002;
   };
-  const stepX = stepFor(spanX);
-  const stepY = stepFor(spanY);
-  const decimals = Math.max(1, Math.ceil(-Math.log10(Math.min(stepX, stepY))));
+  // Equal step on X and Y guarantees every grid cell is a true 1:1 square at every zoom!
+  const step = stepFor(minSpan);
+  const decimals = Math.max(1, Math.ceil(-Math.log10(step)));
 
   ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
-  ctx.strokeStyle = GRID;
   ctx.lineWidth = 1;
 
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   const xLabelY = Math.min(h - 11, frame.top + frame.height + 3);
-  const firstX = Math.ceil(frame.x0 / stepX) * stepX;
-  for (let v = firstX; v <= frame.x1 + 1e-9; v += stepX) {
-    const [px] = frameToScreen(frame, v, frame.y0);
+  const firstX = Math.ceil((frame.x0 - 1e-9) / step) * step;
+  let lastLabelRight = -Infinity;
+  for (let v = firstX; v <= frame.x1 + 1e-9; v += step) {
+    const cleanV = Math.abs(v) < 1e-9 ? 0 : v;
+    const [px] = frameToScreen(frame, cleanV, frame.y0);
     if (px < frame.left - 0.5 || px > frame.left + frame.width + 0.5) continue;
+    ctx.strokeStyle = GRID;
     ctx.beginPath();
     ctx.moveTo(px, frame.top);
     ctx.lineTo(px, frame.top + frame.height);
     ctx.stroke();
-    if (px < 12 || px > w - 16) continue;
+
+    if (cleanV < -1e-6 || cleanV > 1.0 + 1e-6) continue;
+    if (px < frame.left + 2 || px > w - 18) continue;
+    const txt = cleanV.toFixed(decimals);
+    const halfW = ctx.measureText(txt).width * 0.5 + 3;
+    if (px - halfW < lastLabelRight) continue;
+    lastLabelRight = px + halfW;
     ctx.fillStyle = TEXT;
-    ctx.fillText(v.toFixed(decimals), px, xLabelY);
+    ctx.fillText(txt, px, xLabelY);
   }
 
   const labelOutside = frame.left >= 22;
   ctx.textAlign = labelOutside ? 'right' : 'left';
   ctx.textBaseline = 'middle';
   const yLabelX = labelOutside ? frame.left - 5 : frame.left + 4;
-  const firstY = Math.ceil(frame.y0 / stepY) * stepY;
+  const firstY = Math.ceil((frame.y0 - 1e-9) / step) * step;
   const drawnTickYs: number[] = [];
-  for (let v = firstY; v <= frame.y1 + 1e-9; v += stepY) {
-    const [, py] = frameToScreen(frame, frame.x0, v);
+  for (let v = firstY; v <= frame.y1 + 1e-9; v += step) {
+    const cleanV = Math.abs(v) < 1e-9 ? 0 : v;
+    const [, py] = frameToScreen(frame, frame.x0, cleanV);
     if (py < frame.top - 0.5 || py > frame.top + frame.height + 0.5) continue;
+    ctx.strokeStyle = GRID;
     ctx.beginPath();
     ctx.moveTo(frame.left, py);
     ctx.lineTo(frame.left + frame.width, py);
     ctx.stroke();
+
+    if (cleanV < -1e-6 || cleanV > 1.0 + 1e-6) continue;
     const clampedY = Math.min(h - 14, Math.max(20, py));
     if (Math.abs(clampedY - py) > 4) continue;
     drawnTickYs.push(clampedY);
     ctx.fillStyle = TEXT;
-    ctx.fillText(v.toFixed(decimals), yLabelX, clampedY);
+    ctx.fillText(cleanV.toFixed(decimals), yLabelX, clampedY);
   }
 
   const hAxisName = coord === 'uv' ? "u'" : 'x';
@@ -839,13 +936,12 @@ function drawCieAxes(
   ctx.fillStyle = TEXT;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
-  if (frame.left + frame.width + 6 <= w - 12) {
-    ctx.fillText(hAxisName, frame.left + frame.width + 5, xLabelY);
+  if (frame.left + frame.width + 4 <= w - 10) {
+    ctx.fillText(hAxisName, frame.left + frame.width + 4, xLabelY);
   }
   if (labelOutside) {
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    // Always center v' / y cleanly between the top two drawn tick labels so it has wide breathing room!
     let vNameY = frame.top + 18;
     if (drawnTickYs.length >= 2) {
       const sorted = [...drawnTickYs].sort((a, b) => a - b);

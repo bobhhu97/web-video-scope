@@ -1,0 +1,71 @@
+---
+description: HUD/浮层的 Shadow DOM、Top Layer、全屏与宿主页面 DOM 重建约定。改 ui/ 之前必读。
+globs: src/ui/**,src/content/fullscreen.ts,src/content/keep-attached.ts
+alwaysApply: false
+---
+
+# UI 与 DOM 约定
+
+这些条目每一条都对应一个曾经真实发生、且很难复现的 bug。
+
+## 一、Shadow DOM 宿主样式
+
+面板宿主是 `div#video-scopes-host`，用 `attachShadow({ mode: 'open' })`，
+内部 `:host { all: initial; }` 做完全隔离。
+
+宿主元素自身的样式必须用 `style.setProperty(prop, val, 'important')` **逐条**写：
+
+```ts
+// ✅ 逐条 important，宿主页面的 !important 规则压不住它
+const imp = (prop: string, val: string) => host.style.setProperty(prop, val, 'important');
+imp('position', 'fixed'); imp('z-index', '2147483646');
+
+// ❌ 一次性 cssText：顺序写错（先写 position 后写 all）会把定位静默清掉；也挡不住宿主的 !important
+host.style.cssText = 'all:initial;position:fixed;z-index:2147483646;';
+```
+
+## 二、`[popover]` 宿主绝对不要 `all: initial`
+
+`all: initial` 会重置浏览器管理的 popover 属性，导致 `[popover]:not(:popover-open){display:none}`
+把浮层永久藏起来。False Color 层（`#video-scopes-false-color`）与吸管 tooltip
+（`#video-scopes-cursor-probe`）走 `placeTopLayerOverlayHost()`：
+
+- 挂到 `documentElement` 或 fullscreen 元素下
+- 设 `popover="manual"` + `showPopover()` 进 Top Layer，才能压住 `z-index: 2147483647` 的播放器壳、
+  弹幕层与 `<dialog>`，也不受 `<html>`/`<body>` 上 `transform`/`filter`/`contain` 的包含块影响
+- `showPopover()` 可能被拒绝 → 必须**立即移除 `popover` 属性**回落 `position: fixed`，
+  否则 UA 规则会让它不可见
+
+## 三、全屏
+
+- 容器全屏：把浮层重挂到 `document.fullscreenElement` 下。
+- 原生 `<video>` 全屏：`<video>` 是 replaced element，**不能**append 子节点 —— 此时浮层留在
+  `documentElement` 并升到 Top Layer。`overlayFullscreenParent()` 负责这个判断。
+- 监听 `fullscreenchange` 后要重新 `resize()` + 强制重绘一帧。
+
+## 四、宿主页面会重建 DOM
+
+YouTube（Polymer 水合）、各类 SPA 会整体替换 `documentElement` 的子节点，
+content script 在 `document_start` 插入的 host 会作为附带损失被删掉 —— 面板"挂上了，
+报告已挂载，然后消失"。没有"我被移除"事件，`keepAttached()` 的 MutationObserver 是唯一可靠防御。
+
+改这段时注意：`guardian.stop()` 在迁到独立窗口时必须调用，否则两处抢同一个 host。
+
+## 五、每 cell 独立配置
+
+`CellConfig` 是每个格子的独立配置（scope 类型、通道、着色、增益、zoom/pan、色域）。
+`resolveCells()` 负责从旧的 `state.panels` 结构迁移，`assignCellSlot()` 做 Resize 风格的交换
+（除非 `allowDuplicate`）。新增字段时：`settings.ts` 的接口 + `defaultCellForMode()` 默认值 +
+`resolveCells()` 的合并逻辑，三处都要动，否则老用户的存档会缺字段。
+
+## 六、改完必须验证
+
+面板结构、样式、布局改动后**必须**跑：
+
+```bash
+node scripts/verify-layout.mjs
+```
+
+它在 `deviceScaleFactor: 2` 下量像素：trace 是否溢出边框、刻度文字是否存在、
+每个布局按钮是否真的产生 N 个有尺寸的 panel。Retina 下的溢出 bug 在 1x 下测不出来
+（曾经把 device 像素当 CSS 像素、又减了一次 margin）。

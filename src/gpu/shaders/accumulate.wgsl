@@ -2,7 +2,7 @@ struct Params {
   size: vec4u,      // srcW, srcH, plotW, plotH
   opts: vec4u,      // accMode(0=wave,1=parade,2=vec,3=cie,4=hist), subMode, traceMode, flags
   coeff: vec4f,     // kr, kg, kb, zoom
-  srcCoeff: vec4f,  // sourceMatrix kr, kg, kb, 0
+  srcCoeff: vec4f,  // sourceMatrix kr, kg, kb, sdrWhiteNits
   m0: vec4f,        // rgb -> xyz row 0
   m1: vec4f,        // rgb -> xyz row 1
   m2: vec4f,        // rgb -> xyz row 2
@@ -203,6 +203,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let panY = p.view.y;
   let nitLow = p.view.z;
   let nitHigh = p.view.w;
+  let sdrRefWhite = select(SDR_REF_WHITE_NITS, p.srcCoeff.w, p.srcCoeff.w > 10.0);
 
   let px = sampleInput(i32(gid.x), i32(gid.y), srcW, srcH, lowPass);
 
@@ -238,53 +239,70 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
       let nr = pqToNits(clamp(rNorm, 0.0, 1.0));
       let ng = pqToNits(clamp(gNorm, 0.0, 1.0));
       let nb = pqToNits(clamp(bNorm, 0.0, 1.0));
-      linRgb = vec3f(nr, ng, nb) / SDR_REF_WHITE_NITS;
+      linRgb = vec3f(nr, ng, nb) / sdrRefWhite;
       pixelNits = max(pqToNits(clamp(yNorm, 0.0, 1.0)), max(nr, max(ng, nb)));
     } else if (effectiveTransfer == 2u) {
       let nr = hlgToNits(clamp(rNorm, 0.0, 1.0));
       let ng = hlgToNits(clamp(gNorm, 0.0, 1.0));
       let nb = hlgToNits(clamp(bNorm, 0.0, 1.0));
-      linRgb = vec3f(nr, ng, nb) / SDR_REF_WHITE_NITS;
+      linRgb = vec3f(nr, ng, nb) / sdrRefWhite;
       pixelNits = max(hlgToNits(clamp(yNorm, 0.0, 1.0)), max(nr, max(ng, nb)));
     } else {
       linRgb = vec3f(srgbToLinear(dispRgb.r), srgbToLinear(dispRgb.g), srgbToLinear(dispRgb.b));
-      pixelNits = (kr * linRgb.r + kg * linRgb.g + kb * linRgb.b) * SDR_REF_WHITE_NITS;
+      pixelNits = (kr * linRgb.r + kg * linRgb.g + kb * linRgb.b) * sdrRefWhite;
     }
   } else if (sourceTransfer > 0u) {
-    // True HDR video via rgba16float external texture: extended sRGB where linear 1.0 = 203 nits.
-    let lr = max(0.0, srgbToLinear(px.r));
-    let lg = max(0.0, srgbToLinear(px.g));
-    let lb = max(0.0, srgbToLinear(px.b));
-    linRgb = vec3f(lr, lg, lb);
-    let nitsR = lr * SDR_REF_WHITE_NITS;
-    let nitsG = lg * SDR_REF_WHITE_NITS;
-    let nitsB = lb * SDR_REF_WHITE_NITS;
-    let lumNits = kr * nitsR + kg * nitsG + kb * nitsB;
+    // Hardware-decoded HDR video (1u=PQ, 2u=HLG): Downscaler recovered exact normalized
+    // [0..1] non-linear PQ/HLG R'G'B' in the stream's native primaries (e.g. BT.2020).
+    let rCode = clamp(px.r, 0.0, 1.0);
+    let gCode = clamp(px.g, 0.0, 1.0);
+    let bCode = clamp(px.b, 0.0, 1.0);
+    let yCode = kr * rCode + kg * gCode + kb * bCode;
+    var nitsR = 0.0;
+    var nitsG = 0.0;
+    var nitsB = 0.0;
+    var lumNits = 0.0;
+    if (sourceTransfer == 1u) {
+      nitsR = pqToNits(rCode);
+      nitsG = pqToNits(gCode);
+      nitsB = pqToNits(bCode);
+      lumNits = pqToNits(yCode);
+    } else {
+      nitsR = hlgToNits(rCode);
+      nitsG = hlgToNits(gCode);
+      nitsB = hlgToNits(bCode);
+      lumNits = hlgToNits(yCode);
+    }
+    linRgb = vec3f(nitsR, nitsG, nitsB) / sdrRefWhite;
     pixelNits = max(lumNits, max(nitsR, max(nitsG, nitsB)));
 
-    if (effectiveTransfer == 2u) {
-      axisR = nitsToHlg(nitsR);
-      axisG = nitsToHlg(nitsG);
-      axisB = nitsToHlg(nitsB);
-    } else if (effectiveTransfer == 1u) {
-      axisR = nitsToPq(nitsR);
-      axisG = nitsToPq(nitsG);
-      axisB = nitsToPq(nitsB);
+    if (effectiveTransfer == 1u) {
+      axisR = select(nitsToPq(nitsR), rCode, sourceTransfer == 1u);
+      axisG = select(nitsToPq(nitsG), gCode, sourceTransfer == 1u);
+      axisB = select(nitsToPq(nitsB), bCode, sourceTransfer == 1u);
+    } else if (effectiveTransfer == 2u) {
+      axisR = select(nitsToHlg(nitsR), rCode, sourceTransfer == 2u);
+      axisG = select(nitsToHlg(nitsG), gCode, sourceTransfer == 2u);
+      axisB = select(nitsToHlg(nitsB), bCode, sourceTransfer == 2u);
     } else {
-      axisR = clamp(blend(px.r), 0.0, 1.0);
-      axisG = clamp(blend(px.g), 0.0, 1.0);
-      axisB = clamp(blend(px.b), 0.0, 1.0);
+      axisR = clamp(blend(rCode), 0.0, 1.0);
+      axisG = clamp(blend(gCode), 0.0, 1.0);
+      axisB = clamp(blend(bCode), 0.0, 1.0);
     }
     axisY = kr * axisR + kg * axisG + kb * axisB;
-    cb = (axisB - axisY) / (2.0 * (1.0 - kb));
-    cr = (axisR - axisY) / (2.0 * (1.0 - kr));
+    cb = (bCode - yCode) / (2.0 * (1.0 - kb));
+    cr = (rCode - yCode) / (2.0 * (1.0 - kr));
     let skr = p.srcCoeff.x;
     let skb = p.srcCoeff.z;
-    let sY = skr * axisR + p.srcCoeff.y * axisG + skb * axisB;
-    vecCb = (axisB - sY) / (2.0 * (1.0 - skb));
-    vecCr = (axisR - sY) / (2.0 * (1.0 - skr));
-    let peakLin = max(1.0, max(lr, max(lg, lb)));
-    dispRgb = vec3f(linearToSrgb(lr / peakLin), linearToSrgb(lg / peakLin), linearToSrgb(lb / peakLin));
+    let sY = skr * rCode + p.srcCoeff.y * gCode + skb * bCode;
+    vecCb = (bCode - sY) / (2.0 * (1.0 - skb));
+    vecCr = (rCode - sY) / (2.0 * (1.0 - skr));
+    let peakLin = max(1.0, max(linRgb.r, max(linRgb.g, linRgb.b)));
+    dispRgb = vec3f(
+      linearToSrgb(linRgb.r / peakLin),
+      linearToSrgb(linRgb.g / peakLin),
+      linearToSrgb(linRgb.b / peakLin),
+    );
   } else {
     // SDR display source (or manual HDR curve applied onto [0..1] code signal).
     let rClamped = clamp(px.r, 0.0, 1.0);
@@ -311,7 +329,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     } else if (effectiveTransfer == 2u) {
       pixelNits = max(hlgToNits(axisY), max(hlgToNits(axisR), max(hlgToNits(axisG), hlgToNits(axisB))));
     } else {
-      pixelNits = (kr * linRgb.r + kg * linRgb.g + kb * linRgb.b) * SDR_REF_WHITE_NITS;
+      pixelNits = (kr * linRgb.r + kg * linRgb.g + kb * linRgb.b) * sdrRefWhite;
     }
   }
 
@@ -424,20 +442,30 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     }
     let cx = p.frameA.x;
     let cy = p.frameA.y;
-    let discCx = p.frameA.z;
-    let discCy = p.frameA.w;
-    let radius = p.frameB.x;
+    let ringR = p.frameB.x;
     let scale = p.frameB.y;
     let sx = cx + vecCb * scale;
     let sy = cy - vecCr * scale;
-    let dx = sx - discCx;
-    let dy = sy - discCy;
-    if (dx * dx + dy * dy > (radius + 1.5) * (radius + 1.5)) { return; }
+    let dx = sx - cx;
+    let dy = sy - cy;
+    if (dx * dx + dy * dy > (ringR + 1.5) * (ringR + 1.5)) { return; }
     if (sx < 0.0 || sx >= f32(dstW) || sy < 0.0 || sy >= f32(dstH)) { return; }
     let idx = u32(floor(sy)) * dstW + u32(floor(sx));
     atomicAdd(&density[idx], 1u);
     if (traceMode == 3u) {
-      let zPlane = select(select(1u, 2u, pixelNits >= nitLow), 3u, pixelNits > nitHigh);
+      let hasRefSplit = (sdrRefWhite > nitLow + 8.0) && (sdrRefWhite < nitHigh - 15.0);
+      var zPlane = 2u;
+      if (pixelNits > nitHigh + 1.0) {
+        zPlane = 4u;
+      } else if (hasRefSplit) {
+        if (pixelNits > sdrRefWhite + 1.0) {
+          zPlane = 3u;
+        } else if (pixelNits < nitLow) {
+          zPlane = 1u;
+        }
+      } else if (pixelNits > nitLow + 1.0) {
+        zPlane = 3u;
+      }
       atomicAdd(&density[zPlane * stride + idx], 1u);
     }
   } else if (accMode == 3u) {
@@ -455,17 +483,31 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     }
     let fLeft = p.frameA.x;
     let fTop = p.frameA.y;
+    let fWidth = p.frameA.z;
     let fHeight = p.frameA.w;
     let fx0 = p.frameB.x;
     let fy0 = p.frameB.y;
     let fScale = p.frameB.z;
     let sx = fLeft + (cx - fx0) * fScale;
     let sy = fTop + fHeight - (cy - fy0) * fScale;
+    if (sx < fLeft || sx >= fLeft + fWidth || sy < fTop || sy >= fTop + fHeight) { return; }
     if (sx < 0.0 || sx >= f32(dstW) || sy < 0.0 || sy >= f32(dstH)) { return; }
     let idx = u32(floor(sy)) * dstW + u32(floor(sx));
     atomicAdd(&density[idx], 1u);
     if (traceMode == 3u) {
-      let zPlane = select(select(1u, 2u, pixelNits >= nitLow), 3u, pixelNits > nitHigh);
+      let hasRefSplit = (sdrRefWhite > nitLow + 8.0) && (sdrRefWhite < nitHigh - 15.0);
+      var zPlane = 2u;
+      if (pixelNits > nitHigh + 1.0) {
+        zPlane = 4u;
+      } else if (hasRefSplit) {
+        if (pixelNits > sdrRefWhite + 1.0) {
+          zPlane = 3u;
+        } else if (pixelNits < nitLow) {
+          zPlane = 1u;
+        }
+      } else if (pixelNits > nitLow + 1.0) {
+        zPlane = 3u;
+      }
       atomicAdd(&density[zPlane * stride + idx], 1u);
     }
   } else if (accMode == 4u) {

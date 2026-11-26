@@ -69,6 +69,8 @@ export interface CellConfig {
   gain: number;
   gamma: number;
   barTargets: 0.75 | 1;
+  /** Magnify Vectorscope signal trace by 2× around center without zooming graticule/view. */
+  vecScale2x?: boolean;
   showSkinLine: boolean;
   toneFilter: ToneFilter;
   coord: 'xy' | 'uv';
@@ -115,6 +117,8 @@ export interface HudState {
   panelOpacity: number;
   /** Graticule grid & label brightness multiplier (0.4..1.6). */
   graticuleBrightness: number;
+  /** Global default trace coloring preference set from Settings ('default' | TraceColorMode). */
+  defaultTraceMode?: 'default' | TraceColorMode;
   units: Unit;
   gain: number;
   gamma: number;
@@ -137,22 +141,44 @@ export function supportsHdrZones(mode: ScopeMode): boolean {
   return mode !== 'vectorscope' && mode !== 'cie';
 }
 
+export function resolveTraceForMode(
+  mode: ScopeMode,
+  pref: 'default' | TraceColorMode | undefined,
+): TraceColorMode {
+  const isScatter = mode === 'vectorscope' || mode === 'cie';
+  if (!pref || pref === 'default') {
+    return isScatter ? 'colorize' : 'channel';
+  }
+  if (pref === 'hdr-zones' && !supportsHdrZones(mode)) {
+    return 'colorize';
+  }
+  if (pref === 'colorize' && mode === 'histogram') {
+    return 'channel';
+  }
+  if (pref === 'channel' && isScatter) {
+    return 'colorize';
+  }
+  return pref;
+}
+
 export function defaultCellForMode(
   mode: ScopeMode,
-  base?: Partial<Pick<HudState, 'units' | 'gain' | 'gamma' | 'barTargets' | 'coord' | 'gamuts'>>,
+  base?: Partial<
+    Pick<HudState, 'units' | 'gain' | 'gamma' | 'barTargets' | 'coord' | 'gamuts' | 'defaultTraceMode'>
+  >,
 ): CellConfig {
-  const isScatter = mode === 'vectorscope' || mode === 'cie';
   return {
     mode,
     waveChannels: mode === 'waveform-rgb' ? 'RGB' : 'Y',
     paradeMode: 'RGB',
     histMode: 'YRGB',
-    traceMode: isScatter ? 'colorize' : 'channel',
+    traceMode: resolveTraceForMode(mode, base?.defaultTraceMode),
     lowPass: false,
     units: base?.units ?? 'auto',
     gain: base?.gain ?? 0.9,
     gamma: base?.gamma ?? 0.9,
     barTargets: base?.barTargets ?? 0.75,
+    vecScale2x: false,
     showSkinLine: true,
     toneFilter: 'all',
     coord: base?.coord ?? 'xy',
@@ -183,6 +209,7 @@ export const DEFAULT_STATE: HudState = {
   probeConfig: { ...DEFAULT_PROBE_CONFIG },
   panelOpacity: 0.97,
   graticuleBrightness: 1.0,
+  defaultTraceMode: 'default',
   units: 'auto',
   gain: 0.9,
   gamma: 0.9,

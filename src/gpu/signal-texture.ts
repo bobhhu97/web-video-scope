@@ -32,9 +32,10 @@ export class SignalTexture {
     if (this.width === 0 || this.height === 0) throw new Error('source has no dimensions');
     // RENDER_ATTACHMENT is required by Dawn/Chrome for copyExternalImageToTexture's
     // destination even though the spec only demands COPY_DST.
+    // rgba16float preserves 10-bit+ precision and extended-range (>1.0, >203 nits) HDR floats.
     this.texture = device.createTexture({
       size: { width: this.width, height: this.height },
-      format: 'rgba8unorm',
+      format: 'rgba16float',
       usage:
         GPUTextureUsage.COPY_DST |
         GPUTextureUsage.TEXTURE_BINDING |

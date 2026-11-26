@@ -154,15 +154,11 @@ async function boot({ viewport, pattern, state: seed }) {
     { timeout: 20000 },
   );
   const wanted = seed.layout ?? 'grid';
-  const btnLabel = { single: '1', pair: '2', triple: '3', grid: '4' }[wanted];
-  if (btnLabel) {
-    await page.evaluate((label) => {
-      const root = document.getElementById('video-scopes-host').shadowRoot;
-      const btn = [...root.querySelectorAll('#layouts button')]
-        .find((b) => b.textContent.trim() === label);
-      btn?.click();
-    }, btnLabel);
-  }
+  await page.evaluate((lk) => {
+    const root = document.getElementById('video-scopes-host').shadowRoot;
+    const btn = root.querySelector(`#layouts button[data-layout="${lk}"]`);
+    btn?.click();
+  }, wanted);
   return page;
 }
 

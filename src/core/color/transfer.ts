@@ -1,6 +1,14 @@
 
+import type { PrimariesId } from './primaries';
+
 export function srgbToLinear(v: number): number {
   return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+}
+
+export function srgbToLinearSigned(v: number): number {
+  const a = Math.abs(v);
+  const lin = a <= 0.04045 ? a / 12.92 : Math.pow((a + 0.055) / 1.055, 2.4);
+  return v < 0 ? -lin : lin;
 }
 
 export function linearToSrgb(v: number): number {
@@ -86,23 +94,27 @@ export function xyToLinearSrgb(xy: [number, number]): [number, number, number] {
 }
 
 /**
- * Display-path WebGPU BT.709 -> sRGB transfer recovery mode:
- * - `0`: pass-through (`srgb`, `pq`, `hlg`, `unknown` / `smpte170m`)
- * - `1`: macOS / iOS Chromium (`gfx::ColorSpace::TransferID::BT709_APPLE`, gamma `1.9609375`)
- * - `2`: Windows / Linux Chromium (`gfx::ColorSpace::TransferID::BT709`, ITU-R BT.709 OETF)
- *
- * Why needed: WebGPU `importExternalTexture` and `copyExternalImageToTexture` convert
- * `transfer: "bt709"` videos into `"srgb"`, boosting 40.2 IRE midtones to ~44.6 IRE
- * (so a 40.2 IRE pixel missed the 38–42% ARRI green false-color band and sat +4.4 IRE
- * above the Eyedropper readout). Inverting that display re-encoding restores the exact
- * broadcast BT.709 signal level across False Color, Waveform, Parade, and Eyedropper.
+ * Display-path WebGPU `ExternalTexture` / `copyExternalImageToTexture` signal recovery mode:
+ * - `0`: pass-through (`srgb`, `unknown` / `smpte170m`)
+ * - `1`: macOS / iOS Chromium BT.709 SDR (`gfx::ColorSpace::TransferID::BT709_APPLE`, gamma `1.9609375`)
+ * - `2`: Windows / Linux Chromium BT.709 SDR (`gfx::ColorSpace::TransferID::BT709`, ITU-R BT.709 OETF)
+ * - `3`: HDR `PQ` / `HLG` with `BT.2020` primaries (Dawn applies `M_bt2020_to_srgb` + signed `linearToSrgb`
+ *        onto the non-linear `[0..1]` PQ/HLG code vector without running PQ/HLG EOTF)
+ * - `4`: HDR `PQ` / `HLG` with `Display-P3` primaries (`M_p3_to_srgb` + signed `linearToSrgb`)
+ * - `5`: HDR `PQ` / `HLG` with `BT.709` primaries (signed `linearToSrgb` only)
  */
-export type DisplayTransferFix = 0 | 1 | 2;
+export type DisplayTransferFix = 0 | 1 | 2 | 3 | 4 | 5;
 
 export function resolveDisplayTransferFix(
   sourceTransfer: 'bt709' | 'srgb' | 'pq' | 'hlg' | 'unknown',
   platformHint?: string,
+  sourcePrimaries?: PrimariesId | null,
 ): DisplayTransferFix {
+  if (sourceTransfer === 'pq' || sourceTransfer === 'hlg') {
+    if (sourcePrimaries === 'p3') return 4;
+    if (sourcePrimaries === 'rec709') return 5;
+    return 3; // Default for HDR10 / HLG streams (BT.2020)
+  }
   if (sourceTransfer !== 'bt709') return 0;
   const plat =
     platformHint ??
@@ -112,12 +124,45 @@ export function resolveDisplayTransferFix(
   return /Mac|iPhone|iPad|iPod/i.test(plat) ? 1 : 2;
 }
 
+/** Recover original signal RGB [0..1] from Dawn WebGPU's sRGB-reencoded external texture output. */
+export function recoverSignalRgbFromWebGpu(
+  rgb: [number, number, number],
+  mode: DisplayTransferFix,
+): [number, number, number] {
+  if (mode === 0) return [rgb[0], rgb[1], rgb[2]];
+  const lr = srgbToLinearSigned(rgb[0]);
+  const lg = srgbToLinearSigned(rgb[1]);
+  const lb = srgbToLinearSigned(rgb[2]);
+  if (mode === 1) {
+    const inv = 1 / 1.9609375;
+    return [Math.pow(Math.max(0, lr), inv), Math.pow(Math.max(0, lg), inv), Math.pow(Math.max(0, lb), inv)];
+  }
+  if (mode === 2) {
+    const f = (l: number): number => {
+      const v = Math.max(0, l);
+      return v < 0.01805397 ? 4.5 * v : 1.0992968 * Math.pow(v, 0.45) - 0.0992968;
+    };
+    return [f(lr), f(lg), f(lb)];
+  }
+  const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
+  if (mode === 3) {
+    return [
+      clamp01(0.6274039 * lr + 0.329283 * lg + 0.0433131 * lb),
+      clamp01(0.0690973 * lr + 0.9195404 * lg + 0.0113623 * lb),
+      clamp01(0.0163914 * lr + 0.0880133 * lg + 0.8955953 * lb),
+    ];
+  }
+  if (mode === 4) {
+    return [
+      clamp01(0.822462 * lr + 0.177538 * lg),
+      clamp01(0.0331942 * lr + 0.9668058 * lg),
+      clamp01(0.0170826 * lr + 0.0723974 * lg + 0.91052 * lb),
+    ];
+  }
+  return [clamp01(lr), clamp01(lg), clamp01(lb)];
+}
+
 /** Recover original BT.709 signal code [0..1] from WebGPU's sRGB-reencoded value. */
 export function recoverBt709SignalFromSrgb(v: number, mode: DisplayTransferFix): number {
-  if (mode === 0) return v;
-  const lin = Math.max(0, srgbToLinear(Math.max(0, v)));
-  if (mode === 1) {
-    return Math.pow(lin, 1 / 1.9609375);
-  }
-  return lin < 0.01805397 ? 4.5 * lin : 1.0992968 * Math.pow(lin, 0.45) - 0.0992968;
+  return recoverSignalRgbFromWebGpu([v, v, v], mode)[0];
 }

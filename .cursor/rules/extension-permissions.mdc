@@ -1,0 +1,55 @@
+---
+description: 扩展权限、MV3 注入方式、商店合规与隐私承诺。改 manifest 或 background 时必读。
+globs: manifest.json,src/background/**,CHROMEWEBSTORE.md,docs/privacy-policy.md
+alwaysApply: false
+---
+
+# 扩展权限与合规
+
+## 一、最小权限，且每个都要有调用点
+
+```json
+"permissions": ["activeTab", "scripting", "storage", "tabCapture"]
+```
+
+- **无 `host_permissions`，无自动 `content_scripts`。** 视频可能出现在任何页面，但用
+  `activeTab` + `scripting` 按需注入到用户明确激活的那一个 tab，而不是注入全部网页。
+- `scripts/verify-manifest.mjs` 会检查每个声明的权限在 bundle 里确实有对应 API 调用
+  （`chrome.scripting` / `chrome.storage` / `chrome.tabCapture`）。**加权限就必须加调用点**，
+  否则这项检查会红。
+- 加任何新权限前先问：能不能用 `activeTab` 解决？商店审核会逐条要理由，含糊的措辞会被拒。
+
+## 二、注入链路
+
+```
+action.onClicked / commands.onCommand
+  → tabs.sendMessage(tabId, {type:'show-scopes' | 'hotkey-toggle-scopes'})
+  → 失败（该 tab 还没有 content script）时 scripting.executeScript({ files: ['content.js'] })
+  → 注入与消息投递有竞态，重试 5 次 × 60ms
+  → 仍失败：badge 显示 '!' + 往页面里写红色诊断条（静默失败最像"插件没反应"）
+```
+
+MV3 worker 约 30s 空闲就退出，**模块级变量不能存状态**；capture 状态机放 `storage.session`
+（跨 worker 重启存活，浏览器关闭时清空）。
+
+Chrome 137+ 移除了 `--load-extension`，所以"装扩展"这一步只能手动：
+`chrome://extensions` → Developer mode → Load unpacked → 选 `dist/`。自动化止步于此。
+
+## 三、隐私承诺是硬约束
+
+以下任何一条被破坏，`docs/privacy-policy.md` 与商店声明都会变成虚假陈述：
+
+- **不发任何网络请求。** 无遥测、无远程代码、无远程字体/图片。
+- **不落盘任何帧。** 像素只在 GPU 内存里读取、绘制、丢弃。
+- 设置只存 `chrome.storage.local`；会话态存 `chrome.storage.session`。
+- 不读页面文本、不读浏览历史、不改 `document.title`（`verify-manifest` 有一条专门检查
+  "content.js 从不修改 document.title"）。
+
+## 四、清单里不能出现的东西
+
+`verify-manifest.mjs` 会拦：`eval`、`new Function`、远程脚本/import URL、
+打包 HTML 里的内联 `<script>` 或 `on*=` 处理器、`all_frames: true`、
+超过 1MB 的 bundle。当前 bundle 约 369KB（gzip ~87KB）。
+
+`CHROMEWEBSTORE.md` 是商店文案与权限理由的**唯一真相**（复制粘贴进开发者后台）。
+改权限、改隐私行为、改名称时同步更新它，版本历史表也在这里。
