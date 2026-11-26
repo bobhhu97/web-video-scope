@@ -48,14 +48,15 @@ for (const f of referenced) {
 const escapes = referenced.filter((f) => f.startsWith('/') || f.includes('..'));
 check('no absolute or traversing paths', escapes.length === 0, escapes.join(',') || 'none');
 
-// ---- content script wiring ---------------------------------------------
-// These two settings are silent failure modes: the extension looks installed
-// and enabled, yet nothing is ever injected.
-const cs0 = (manifest.content_scripts ?? [])[0] ?? {};
+// ---- on-demand content script wiring ------------------------------------
+// The extension uses pure on-demand injection (`activeTab` + `chrome.scripting.executeScript`)
+// when the user clicks the toolbar button or presses Alt+S. It must NOT inject
+// background content_scripts onto every webpage or request `<all_urls>`.
+check('on-demand bundle exists: content.js', existsSync(join(DIST, 'content.js')));
 check(
-  'content script runs at document_start or document_end (not idle)',
-  cs0.run_at === 'document_start' || cs0.run_at === 'document_end',
-  String(cs0.run_at),
+  'no automatic content_scripts declared (pure on-demand injection)',
+  (manifest.content_scripts ?? []).length === 0,
+  JSON.stringify(manifest.content_scripts ?? []),
 );
 
 // The content script must be a self-executing classic script: a bare ESM export
@@ -106,23 +107,14 @@ for (const [perm, api] of Object.entries(API_FOR)) {
   if (!api || !perms.includes(perm)) continue;
   check(`permission "${perm}" is used (${api})`, bundleText.includes(api));
 }
-// A content script declared for <all_urls> does NOT run unless the extension
-// also holds matching host permissions. Omitting them is the single most likely
-// reason "clicking the toolbar button does nothing", so require coverage here.
-const declaredMatches = (manifest.content_scripts ?? []).flatMap((c) => c.matches ?? []);
+// Least-privilege check: no broad `<all_urls>` host_permissions. `activeTab` + `scripting`
+// grants temporary access ONLY when the user clicks the icon or invokes the command.
 const hostPerms = manifest.host_permissions ?? [];
-const coversAllUrls = hostPerms.includes('<all_urls>');
-const needsAllUrls = declaredMatches.includes('<all_urls>');
 check(
-  'content script matches are covered by host permissions',
-  !needsAllUrls || coversAllUrls,
-  needsAllUrls
-    ? coversAllUrls
-      ? '<all_urls> covered'
-      : 'MISSING host_permissions for <all_urls> — content script will never be injected'
-    : 'no <all_urls> script',
+  'no broad host_permissions declared (uses activeTab on demand)',
+  hostPerms.length === 0,
+  JSON.stringify(hostPerms),
 );
-check('host_permissions declared', hostPerms.length > 0, JSON.stringify(hostPerms));
 
 // ---- extension-specific rules from the chrome-extensions skill -----------
 // Icons: only reference files that exist. Omitted is fine (Chrome defaults).
@@ -161,11 +153,16 @@ for (const file of htmlFiles) {
   check(`${file}: no on*= inline handler`, !/\son\w+\s*=\s*["']/i.test(html));
 }
 
-// ---- content script match coverage --------------------------------------
-const matches = (manifest.content_scripts ?? []).flatMap((cs) => cs.matches ?? []);
-check('content script matches all urls', matches.includes('<all_urls>'), matches.join(','));
-const cs = (manifest.content_scripts ?? [])[0] ?? {};
-check('content script does not run in all frames by default', cs.all_frames !== true, String(cs.all_frames));
+// ---- zero document.title pollution & command wiring ----------------------
+check(
+  'content.js never mutates document.title',
+  !/document\.title\s*=/.test(contentJs) && !/\[VS:/.test(contentJs),
+);
+check(
+  'declares toggle-scopes keyboard command (Alt+S)',
+  !!manifest.commands?.['toggle-scopes'],
+  JSON.stringify(manifest.commands ?? null),
+);
 
 // ---- bundle size sanity --------------------------------------------------
 let total = 0;

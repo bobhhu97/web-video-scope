@@ -454,8 +454,8 @@ try {
   // its own window. What matters is that the panel reports where it is, so the
   // user can tell the in-page overlay from the detached window.
   const detached = await page.evaluate(() => {
-    const t = document.title;
-    return /\[VS:(floating|returned)/.test(t) || /Floating window/.test(
+    const status = window.__scopeDebug?.status ?? '';
+    return /^(floating|returned)$/.test(status) || /Floating window/.test(
       document.getElementById('video-scopes-host')?.shadowRoot?.getElementById('notice')?.textContent ?? '',
     );
   });

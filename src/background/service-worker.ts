@@ -20,24 +20,38 @@ import {
   type CaptureStopResponse,
 } from '../shared/tab-capture';
 
-// `show`, not `toggle`: the toolbar icon means "show me the scopes". A toggle
-// would close an already-open panel, which reads as a dead button.
+// `show` for toolbar icon clicks ("show/focus scopes"); `toggle` for Alt+S command.
 const SHOW = { type: 'show-scopes' } as const;
+const HOTKEY_TOGGLE = { type: 'hotkey-toggle-scopes' } as const;
 
 chrome.action.onClicked.addListener((tab) => {
   if (tab.id === undefined) return;
-  void toggleInTab(tab.id);
+  void activateInTab(tab.id, SHOW);
 });
 
-async function toggleInTab(tabId: number): Promise<void> {
+chrome.commands?.onCommand.addListener((command, tab) => {
+  if (command !== 'toggle-scopes') return;
+  if (tab?.id !== undefined) {
+    void activateInTab(tab.id, HOTKEY_TOGGLE);
+    return;
+  }
+  void chrome.tabs.query({ active: true, currentWindow: true }).then(([active]) => {
+    if (active?.id !== undefined) void activateInTab(active.id, HOTKEY_TOGGLE);
+  });
+});
+
+async function activateInTab(
+  tabId: number,
+  existingTabMessage: typeof SHOW | typeof HOTKEY_TOGGLE,
+): Promise<void> {
   try {
-    await chrome.tabs.sendMessage(tabId, SHOW);
-    console.info('[video-scopes] told existing content script to show', tabId);
+    await chrome.tabs.sendMessage(tabId, existingTabMessage);
+    console.info('[video-scopes] delivered', existingTabMessage.type, 'to tab', tabId);
     return;
   } catch (e) {
-    // Most common cause: the tab was open before the extension was installed,
-    // so no content script is running in it yet.
-    console.info('[video-scopes] no content script in tab, injecting:', String(e));
+    // Expected on first activation in a tab: no content script runs until the
+    // user clicks the toolbar icon or presses Alt+S.
+    console.info('[video-scopes] injecting content.js on demand:', String(e));
   }
 
   try {
@@ -66,7 +80,7 @@ async function toggleInTab(tabId: number): Promise<void> {
             'font:12px/1.5 ui-monospace,monospace;padding:8px 12px;border-radius:6px;' +
             'max-width:460px;white-space:pre-wrap;background:#3a1414;color:#ffb4b4;' +
             'border:1px solid #ff6b6b';
-          el.textContent = 'Video Scopes: cannot start on this page.\n' + reason;
+          el.textContent = 'Web Video Scope: cannot start on this page.\n' + reason;
           document.documentElement.appendChild(el);
           setTimeout(() => el.remove(), 15000);
         },

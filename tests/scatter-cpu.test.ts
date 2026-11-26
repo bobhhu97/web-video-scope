@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { LUMA } from '../src/core/color/matrices';
+import { LUMA, chromaTargets } from '../src/core/color/matrices';
 import { cieFrame, frameToScreen } from '../src/core/color/cie-frame';
+import { vectorscopeFrame, vectorscopeToScreen } from '../src/core/color/vectorscope-frame';
 import { renderCie, renderVectorscope, type ScatterPlot } from '../src/gpu/scatter-cpu';
 
 /**
@@ -112,6 +113,75 @@ describe('renderVectorscope', () => {
     const plot = renderVectorscope(frame([[255, 0, 0]]), 1, 1, 64, 64, LUMA.bt709, 40);
     expect(litCount(plot)).toBe(0);
   });
+
+  it('lands every 75% and 100% bar on its target box inside a wide 2:1 cell without escaping the disc', () => {
+    const outW = 420;
+    const outH = 210;
+    const f = vectorscopeFrame(outW, outH, 1);
+    const barRgb: Record<string, [number, number, number]> = {
+      red: [255, 0, 0],
+      yellow: [255, 255, 0],
+      green: [0, 255, 0],
+      cyan: [0, 255, 255],
+      blue: [0, 0, 255],
+      magenta: [255, 0, 255],
+    };
+    for (const level of [0.75, 1] as const) {
+      for (const t of chromaTargets(LUMA.bt709, level)) {
+        const base = barRgb[t.name]!;
+        const pxRgb: [number, number, number] = [
+          Math.round(base[0] * level),
+          Math.round(base[1] * level),
+          Math.round(base[2] * level),
+        ];
+        const plot = renderVectorscope(frame([pxRgb]), 1, 1, outW, outH, LUMA.bt709, 1);
+        const c = centroid(plot);
+        const [tx, ty] = vectorscopeToScreen(f, t.cb, t.cr);
+        expect(Math.hypot(c.x - tx, c.y - ty)).toBeLessThan(1.8);
+        // No pixel may bleed outside the circular scope face.
+        for (let py = 0; py < outH; py++) {
+          for (let px = 0; px < outW; px++) {
+            if (plot.data[(py * outW + px) * 4 + 3]! > 0) {
+              expect(Math.hypot(px - f.cx, py - f.cy)).toBeLessThanOrEqual(f.radius + 4);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('suppresses single-pixel noise in a full video frame instead of stamping chunky blocks', () => {
+    const srcW = 320;
+    const srcH = 180;
+    const buf = new Uint8Array(srcW * srcH * 4);
+    // 99.998% neutral grey, plus ONE stray noisy pixel.
+    for (let i = 0; i < srcW * srcH; i++) {
+      buf[i * 4] = 128;
+      buf[i * 4 + 1] = 128;
+      buf[i * 4 + 2] = 128;
+      buf[i * 4 + 3] = 255;
+    }
+    buf[0] = 220;
+    buf[1] = 40;
+    buf[2] = 180;
+
+    const plot = renderVectorscope(buf, srcW, srcH, 300, 200, LUMA.bt709, 1);
+    const f = vectorscopeFrame(300, 200, 1);
+    // Away from the neutral centre, the single noisy pixel must stay faint and un-stamped.
+    let strayLit = 0;
+    let maxStrayAlpha = 0;
+    for (let py = 0; py < 200; py++) {
+      for (let px = 0; px < 300; px++) {
+        const a = plot.data[(py * 300 + px) * 4 + 3]!;
+        if (a > 0 && Math.hypot(px - f.cx, py - f.cy) > 6) {
+          strayLit++;
+          if (a > maxStrayAlpha) maxStrayAlpha = a;
+        }
+      }
+    }
+    expect(strayLit).toBeLessThanOrEqual(1);
+    expect(maxStrayAlpha).toBeLessThan(20);
+  });
 });
 
 describe('renderCie', () => {
@@ -171,7 +241,7 @@ describe('renderCie', () => {
     expect(colors.size).toBe(1);
   });
 
-  it('honours the u-prime v-prime bounds', () => {
+  it('honours the u-prime v-prime bounds and preserves blue channel on white', () => {
     const plot = renderCie(frame([[255, 255, 255]]), 1, 1, 200, 200, 'rec709', 'uv');
     const c = centroid(plot);
     expect(c.total).toBeGreaterThan(0);
@@ -179,5 +249,11 @@ describe('renderCie', () => {
     const [dx, dy] = frameToScreen(f, 0.1978, 0.4683);
     expect(Math.abs(c.x - dx)).toBeLessThan(1.5);
     expect(Math.abs(c.y - dy)).toBeLessThan(1.5);
+    // Previously uv mode left B=0, painting D65 white yellow-green.
+    let maxBlue = 0;
+    for (let i = 0; i < plot.data.length; i += 4) {
+      if (plot.data[i + 3]! > 0) maxBlue = Math.max(maxBlue, plot.data[i + 2]!);
+    }
+    expect(maxBlue).toBeGreaterThan(200);
   });
 });

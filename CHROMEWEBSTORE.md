@@ -1,4 +1,4 @@
-# Chrome Web Store — Video Scopes
+# Chrome Web Store — Web Video Scope
 
 Single source of truth for the store listing, permission justifications, privacy
 disclosure and publishing readiness. Copy-paste from here into the Chrome
@@ -15,7 +15,7 @@ Developer Dashboard.
 **Name** (≤ 75 chars)
 
 ```
-Video Scopes — Waveform, Vectorscope & CIE
+Web Video Scope — Waveform, Vectorscope & CIE
 ```
 
 **Short description** (≤ 132 chars)
@@ -30,7 +30,7 @@ See exposure, black level, colour balance and video range on any video you watch
 ### Detailed description
 
 ```
-Video Scopes overlays broadcast-style measurement tools on any video playing in your browser, so you can see what the picture is actually doing rather than guessing from the display.
+Web Video Scope overlays broadcast-style measurement tools on any video playing in your browser, so you can see what the picture is actually doing rather than guessing from the display.
 
 WHAT YOU SEE
 • Waveform monitor — luma on its own, the three colour channels overlaid, or side-by-side as an RGB parade. This shows exposure per column of the picture and exposes colour casts.
@@ -64,17 +64,18 @@ Every permission needs a specific, plain-English reason. Vague wording such as
 | `storage` | Remembers your panel settings — chosen scale, layout, and quality level — so the panel reappears the way you left it. Stored locally on your computer only. |
 | `tabCapture` | Reads video that is served from another website and blocks direct access to its pixels. Used only when you explicitly request analysis of such a video; it captures the tab you choose and nothing else. |
 
-**Host permissions:** none requested. The extension does not declare
-`host_permissions`; it runs a content script on pages you open so the panel can
-be shown on request.
+**Host permissions:** none requested. The extension declares neither
+`host_permissions` nor automatic `content_scripts`; `content.js` is injected
+into the active tab via `chrome.scripting.executeScript` only when you click
+the toolbar button or press `Alt+S`.
 
 **Remote code:** none. All scripts ship inside the extension package.
 
-### Why no `<all_urls>` host permission
+### Why no `<all_urls>` host permission or background content script
 
-The content script is declared for all sites because video can appear anywhere,
-but no host permission is requested: the script only reads the video element it
-is asked to display and does nothing until you open the panel.
+Video can appear anywhere, so instead of injecting a content script into every
+webpage you open, the extension uses `activeTab` + `scripting` to inject its
+measurement script on demand into the single tab you explicitly activate.
 
 ---
 

@@ -1,4 +1,5 @@
-export type AnalysisPreset = 'low' | 'default' | 'high';
+export type AnalysisPreset = 'low' | 'default' | 'high' | 'ultra' | 'native';
+export type PrecisionMode = 'auto' | AnalysisPreset;
 
 /**
  * Long-edge pixel count per preset. Defining the long edge (not the height)
@@ -9,6 +10,16 @@ export const ANALYSIS_SIZES: Record<AnalysisPreset, number> = {
   low: 320,
   default: 640,
   high: 854,
+  ultra: 1280,
+  native: 1920,
+};
+
+export const PRESET_MAX_PIXELS: Record<AnalysisPreset, number> = {
+  low: 400_000,
+  default: 400_000,
+  high: 400_000,
+  ultra: 950_000,
+  native: 2_100_000,
 };
 
 const MIN_DIM = 1;
@@ -24,7 +35,7 @@ export function analysisSize(
   srcW: number,
   srcH: number,
   preset: AnalysisPreset,
-  maxPixels = 400_000,
+  maxPixels = PRESET_MAX_PIXELS[preset],
 ): { width: number; height: number } {
   if (srcW <= 0 || srcH <= 0) return { width: MIN_DIM, height: MIN_DIM };
   const long = Math.max(srcW, srcH);
@@ -46,8 +57,10 @@ export function analysisSize(
 /** Anything the gather pass can read as its signal source. */
 export interface AnalysisTexture {
   readonly texture: GPUTexture;
+  readonly view: GPUTextureView;
   readonly width: number;
   readonly height: number;
+  readonly format: GPUTextureFormat;
 }
 
 export class Downscaler implements AnalysisTexture {
@@ -56,25 +69,54 @@ export class Downscaler implements AnalysisTexture {
   /** Zero-copy variant: samples a texture_external instead of an rgba8 copy. */
   private externalPipeline: GPURenderPipeline | null = null;
   private sampler: GPUSampler;
+  private uniformBuffer: GPUBuffer;
+  private readonly uScratch = new Uint32Array(4);
+  private lastTransferFix = -1;
   readonly texture: GPUTexture;
+  readonly view: GPUTextureView;
   readonly width: number;
   readonly height: number;
+  readonly format: GPUTextureFormat;
+  private cachedCopySource: GPUTexture | null = null;
+  private cachedCopyBind: GPUBindGroup | null = null;
 
-  constructor(device: GPUDevice, width: number, height: number, code: string) {
+  constructor(
+    device: GPUDevice,
+    width: number,
+    height: number,
+    code: string,
+    opts: { format?: GPUTextureFormat; filter?: GPUFilterMode } = {},
+  ) {
     this.device = device;
     this.width = width;
     this.height = height;
+    // rgba16float preserves 10-bit+ precision AND extended-range (>1.0) HDR floats
+    // from importExternalTexture without 8-bit clamping.
+    this.format = opts.format ?? 'rgba16float';
+    const filter = opts.filter ?? 'linear';
     const module = device.createShaderModule({ code });
     this.pipeline = device.createRenderPipeline({
       layout: 'auto',
       vertex: { module, entryPoint: 'vs' },
-      fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] },
+      fragment: { module, entryPoint: 'fs', targets: [{ format: this.format }] },
       primitive: { topology: 'triangle-list' },
     });
-    // Linear filtering does the bilinear averaging; `nearest` would degrade
-    // this back into point sampling and reintroduce aliasing.
-    this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+    this.sampler = device.createSampler({ magFilter: filter, minFilter: filter });
+    this.uniformBuffer = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.syncTransferFix(0);
     this.texture = this.createTarget(width, height);
+    this.view = this.texture.createView();
+  }
+
+  private syncTransferFix(transferFix: number): void {
+    const mode = transferFix >>> 0;
+    if (mode === this.lastTransferFix) return;
+    this.lastTransferFix = mode;
+    this.uScratch[0] = mode;
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uScratch);
   }
 
   /**
@@ -86,7 +128,7 @@ export class Downscaler implements AnalysisTexture {
     this.externalPipeline = this.device.createRenderPipeline({
       layout: 'auto',
       vertex: { module, entryPoint: 'vs' },
-      fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] },
+      fragment: { module, entryPoint: 'fs', targets: [{ format: this.format }] },
       primitive: { topology: 'triangle-list' },
     });
   }
@@ -99,19 +141,21 @@ export class Downscaler implements AnalysisTexture {
    * Zero-copy: sample an imported video texture straight into the analysis
    * texture. Saves the full-resolution copy entirely.
    */
-  runExternal(encoder: GPUCommandEncoder, external: GPUExternalTexture): void {
+  runExternal(encoder: GPUCommandEncoder, external: GPUExternalTexture, transferFix = 0): void {
     if (!this.externalPipeline) throw new Error('external path not enabled');
+    this.syncTransferFix(transferFix);
     const bind = this.device.createBindGroup({
       layout: this.externalPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: external },
         { binding: 1, resource: this.sampler },
+        { binding: 2, resource: { buffer: this.uniformBuffer } },
       ],
     });
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
-          view: this.texture.createView(),
+          view: this.view,
           loadOp: 'clear',
           storeOp: 'store',
           clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -127,8 +171,7 @@ export class Downscaler implements AnalysisTexture {
   private createTarget(w: number, h: number): GPUTexture {
     return this.device.createTexture({
       size: { width: w, height: h },
-      format: 'rgba8unorm',
-      // COPY_SRC lets tests read the analysis texture back when diagnosing.
+      format: this.format,
       usage:
         GPUTextureUsage.RENDER_ATTACHMENT |
         GPUTextureUsage.TEXTURE_BINDING |
@@ -137,8 +180,8 @@ export class Downscaler implements AnalysisTexture {
   }
 
   /**
-   * Raw I420 variant: samples the Y and interleaved-UV planes and packs them
-   * into the same rgba8 analysis texture the display path produces.
+   * Raw NV12 / P010 variant: samples the Y and interleaved-UV planes and packs them
+   * into the analysis texture.
    */
   runRaw(encoder: GPUCommandEncoder, planes: { y: GPUTexture; uv: GPUTexture }): void {
     const bind = this.device.createBindGroup({
@@ -152,7 +195,7 @@ export class Downscaler implements AnalysisTexture {
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
-          view: this.texture.createView(),
+          view: this.view,
           loadOp: 'clear',
           storeOp: 'store',
           clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -166,18 +209,23 @@ export class Downscaler implements AnalysisTexture {
   }
 
   /** Draw the source texture into the analysis target. Costs one fullscreen triangle. */
-  run(encoder: GPUCommandEncoder, source: GPUTexture): void {
-    const bind = this.device.createBindGroup({
-      layout: this.pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: source.createView() },
-        { binding: 1, resource: this.sampler },
-      ],
-    });
+  run(encoder: GPUCommandEncoder, source: GPUTexture, transferFix = 0): void {
+    this.syncTransferFix(transferFix);
+    if (source !== this.cachedCopySource || !this.cachedCopyBind) {
+      this.cachedCopySource = source;
+      this.cachedCopyBind = this.device.createBindGroup({
+        layout: this.pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: source.createView() },
+          { binding: 1, resource: this.sampler },
+          { binding: 2, resource: { buffer: this.uniformBuffer } },
+        ],
+      });
+    }
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
-          view: this.texture.createView(),
+          view: this.view,
           loadOp: 'clear',
           storeOp: 'store',
           clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -185,12 +233,15 @@ export class Downscaler implements AnalysisTexture {
       ],
     });
     pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, bind);
+    pass.setBindGroup(0, this.cachedCopyBind);
     pass.draw(3);
     pass.end();
   }
 
   destroy(): void {
+    this.cachedCopySource = null;
+    this.cachedCopyBind = null;
+    this.uniformBuffer.destroy();
     this.texture.destroy();
   }
 }

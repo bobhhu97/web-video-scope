@@ -26,7 +26,7 @@ struct VSOut {
   var pts = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
   var o: VSOut;
   o.pos = vec4f(pts[i], 0.0, 1.0);
-  o.uv = vec2f((pts[i].x + 1.0) * 0.5, (pts[i].y + 1.0) * 0.5);
+  o.uv = vec2f((pts[i].x + 1.0) * 0.5, (1.0 - pts[i].y) * 0.5);
   return o;
 }
 

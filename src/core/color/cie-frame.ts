@@ -3,18 +3,11 @@
  *
  * A CIE xy diagram is only readable at 1:1 axis scale: x and y are the same kind
  * of quantity, so one unit of x must occupy the same number of pixels as one unit
- * of y. Stretching the data bounds to fill whatever aspect ratio a panel happens
- * to have squashes the horseshoe — measured at 1.86x anisotropy in a wide panel,
- * i.e. 86% wider than it should be, which is not a subtle distortion.
+ * of y. So the plot is letterboxed: pick the scale that fits both axes, then
+ * centre the resulting box.
  *
- * So the plot is letterboxed: pick the scale that fits both axes, then centre the
- * resulting box. Panels of any size or shape get a correctly proportioned
- * diagram, with unused margin instead of distortion.
- *
- * This module is the single source of truth for both the graticule (which draws
- * the locus) and the scatter renderer (which plots the data). They used to keep
- * separate copies of CIE_BOUNDS, so any change to one silently misaligned the
- * other.
+ * Supports both default white-point-centred zoom and arbitrary cursor-anchored
+ * pan/zoom via `(panX, panY)` representing the bottom-left chromaticity origin.
  */
 
 /** Chromaticity bounds of the plot: [x0, y0, x1, y1]. */
@@ -23,7 +16,7 @@ export const CIE_BOUNDS: Record<'xy' | 'uv', readonly [number, number, number, n
   uv: [0, 0, 0.62, 0.6],
 };
 
-/** D65 white point in each coordinate system; the zoom anchor. */
+/** D65 white point in each coordinate system; the default zoom anchor. */
 export const WHITE_POINT: Record<'xy' | 'uv', readonly [number, number]> = {
   xy: [0.3127, 0.329],
   uv: [0.1978, 0.4683],
@@ -47,15 +40,17 @@ export interface CieFrame {
 /**
  * Fit a chromaticity box into a canvas with equal axis scaling.
  *
- * `zoom` magnifies around the white point, clamped so the view never leaves the
- * published bounds — showing empty space beyond 0.8 would suggest chromaticities
- * exist there.
+ * When `panX`/`panY` are omitted or null, `zoom` magnifies around the D65 white
+ * point. When provided, `(panX, panY)` sets the bottom-left `(x0, y0)` origin,
+ * clamped inside `CIE_BOUNDS[coord]`.
  */
 export function cieFrame(
   w: number,
   h: number,
   coord: 'xy' | 'uv',
   zoom = 1,
+  panX?: number | null,
+  panY?: number | null,
 ): CieFrame {
   const [bx0, by0, bx1, by1] = CIE_BOUNDS[coord];
 
@@ -65,10 +60,12 @@ export function cieFrame(
   const spanW = fullW / z;
   const spanH = fullH / z;
 
-  // Centre the zoomed view on the white point, then keep it inside the bounds.
   const [wx, wy] = WHITE_POINT[coord];
-  let x0 = Math.min(Math.max(wx - spanW / 2, bx0), bx1 - spanW);
-  let y0 = Math.min(Math.max(wy - spanH / 2, by0), by1 - spanH);
+  const reqX0 = panX != null && Number.isFinite(panX) ? panX : wx - spanW / 2;
+  const reqY0 = panY != null && Number.isFinite(panY) ? panY : wy - spanH / 2;
+
+  let x0 = Math.min(Math.max(reqX0, bx0), bx1 - spanW);
+  let y0 = Math.min(Math.max(reqY0, by0), by1 - spanH);
   if (!Number.isFinite(x0)) x0 = bx0;
   if (!Number.isFinite(y0)) y0 = by0;
   const x1 = x0 + spanW;
@@ -78,7 +75,6 @@ export function cieFrame(
   const spanY = y1 - y0;
   const safeW = Math.max(1, w);
   const safeH = Math.max(1, h);
-  // The one number that must be shared by both axes.
   const scale = Math.min(safeW / spanX, safeH / spanY);
 
   const width = spanX * scale;
@@ -105,4 +101,80 @@ export function frameToScreen(f: CieFrame, x: number, y: number): [number, numbe
 /** Canvas pixel back to chromaticity. Exact inverse of `frameToScreen`. */
 export function screenToFrame(f: CieFrame, px: number, py: number): [number, number] {
   return [f.x0 + (px - f.left) / f.scale, f.y0 + (f.top + f.height - py) / f.scale];
+}
+
+/** Zoom around `(cursorX, cursorY)` so the chromaticity under the cursor stays stationary. */
+export function zoomCieAt(
+  w: number,
+  h: number,
+  coord: 'xy' | 'uv',
+  zoom: number,
+  panX: number | null | undefined,
+  panY: number | null | undefined,
+  nextZoom: number,
+  cursorX: number,
+  cursorY: number,
+): { zoom: number; panX: number | null; panY: number | null } {
+  const z1 = Math.max(1, Math.min(16, nextZoom));
+  if (z1 <= 1.0001) return { zoom: 1, panX: null, panY: null };
+  const before = cieFrame(w, h, coord, zoom, panX, panY);
+  const [cx, cy] = screenToFrame(before, cursorX, cursorY);
+  const afterShape = cieFrame(w, h, coord, z1, 0, 0);
+  const rawX0 = cx - (cursorX - afterShape.left) / afterShape.scale;
+  const rawY0 = cy - (afterShape.top + afterShape.height - cursorY) / afterShape.scale;
+  const clamped = cieFrame(w, h, coord, z1, rawX0, rawY0);
+  return { zoom: z1, panX: clamped.x0, panY: clamped.y0 };
+}
+
+/**
+ * Padded CIE viewport frame used by UI graticule and GPU renderer so the top of
+ * the CIE 1976 u'v' spectral locus (`v' ≈ 0.584`), axis tick labels (`0.6`), and
+ * header metadata never collide at the canvas border while keeping exact 1:1 scale.
+ */
+export function cieViewportFrame(
+  w: number,
+  h: number,
+  coord: 'xy' | 'uv',
+  zoom = 1,
+  panX?: number | null,
+  panY?: number | null,
+  dpr = 1,
+): CieFrame {
+  const s = Math.max(0.5, dpr);
+  const padL = Math.min(32 * s, w * 0.15);
+  const padR = Math.min(20 * s, w * 0.09);
+  const padT = Math.min(28 * s, h * 0.16);
+  const padB = Math.min(20 * s, h * 0.12);
+  const innerW = Math.max(8, w - padL - padR);
+  const innerH = Math.max(8, h - padT - padB);
+  const inner = cieFrame(innerW, innerH, coord, zoom, panX, panY);
+  return {
+    ...inner,
+    left: padL + inner.left,
+    top: padT + inner.top,
+  };
+}
+
+/** Cursor-anchored zoom using the padded CIE viewport geometry. */
+export function zoomCieViewportAt(
+  w: number,
+  h: number,
+  coord: 'xy' | 'uv',
+  zoom: number,
+  panX: number | null | undefined,
+  panY: number | null | undefined,
+  nextZoom: number,
+  cursorX: number,
+  cursorY: number,
+  dpr = 1,
+): { zoom: number; panX: number | null; panY: number | null } {
+  const z1 = Math.max(1, Math.min(16, nextZoom));
+  if (z1 <= 1.0001) return { zoom: 1, panX: null, panY: null };
+  const before = cieViewportFrame(w, h, coord, zoom, panX, panY, dpr);
+  const [cx, cy] = screenToFrame(before, cursorX, cursorY);
+  const afterShape = cieViewportFrame(w, h, coord, z1, 0, 0, dpr);
+  const rawX0 = cx - (cursorX - afterShape.left) / afterShape.scale;
+  const rawY0 = cy - (afterShape.top + afterShape.height - cursorY) / afterShape.scale;
+  const clamped = cieViewportFrame(w, h, coord, z1, rawX0, rawY0, dpr);
+  return { zoom: z1, panX: clamped.x0, panY: clamped.y0 };
 }

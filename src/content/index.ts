@@ -1,18 +1,36 @@
 import { VideoDetector } from './video-detector';
 import { FrameLoop } from './frame-loop';
-import { followFullscreen } from './fullscreen';
-import { readVideoColorSpace, applyRangeMode } from './color-space';
-import { ScopeController } from './scope-controller';
+import { followFullscreen, overlayFullscreenParent } from './fullscreen';
+import { readVideoColorSpace, applyRangeMode, UNKNOWN_COLOR_SPACE } from './color-space';
+import { ScopeController, type HdrFrameStats } from './scope-controller';
 import { Hud, type HudHandlers } from '../ui/hud';
-import { DEFAULT_STATE, loadSettings, saveSettings, type HudState, type Layout } from '../ui/settings';
+import { t } from '../ui/i18n';
+import {
+  DEFAULT_PROBE_CONFIG,
+  DEFAULT_STATE,
+  loadSettings,
+  resolveCells,
+  saveSettings,
+  type CellConfig,
+  type HudState,
+  type Layout,
+} from '../ui/settings';
 import {
   DEFAULT_SCOPE_OPTIONS,
   type ScopeMode,
   type ScopeOptions,
 } from '../gpu/scope-renderer';
-import { RangeDetector, type ColorSpaceInfo } from '../core/range-detector';
+import type { FalseColorConfig } from '../ui/false-color-overlay';
+import type { PrimariesId } from '../core/color/primaries';
+import { resolveDisplayTransferFix } from '../core/color/transfer';
+import {
+  RangeDetector,
+  sanitizeRangeDiagnosis,
+  type ColorSpaceInfo,
+} from '../core/range-detector';
 import { histogramStats } from '../core/scopes/stats';
 import type { RangeSpec } from '../core/scale/quantize';
+import { resolveEffectiveTransfer, resolveEffectiveUnit } from '../core/scale/units';
 import {
   TIER_DESCRIPTION,
   initialGovernorState,
@@ -23,18 +41,13 @@ import {
 import { GpuTimer } from '../core/gpu-timer';
 import { getDevice } from '../gpu/device';
 import type { AnalysisPreset } from '../gpu/downscale';
-import { Probe, formatSample } from '../ui/probe';
+import { CursorProbeTooltip, Probe, formatSample, type ProbeSample } from '../ui/probe';
 import { openFloatingWindow, pipSupported, type FloatingWindow } from '../ui/pip';
 import { videoReadability, readabilityNotice, type Readability } from './readability';
 import { keepAttached, type Guardian } from './keep-attached';
 
 const HOST_ID = 'video-scopes-host';
 
-/**
- * Last-resort visibility. If anything below throws, this leaves a note in the
- * page so a failure is visible instead of silent. Only shown when something
- * goes wrong — a healthy run never creates it.
- */
 function showDiagnostic(kind: 'injected' | 'error', detail: string): void {
   const id = 'video-scopes-diag';
   let el = document.getElementById(id);
@@ -48,7 +61,7 @@ function showDiagnostic(kind: 'injected' | 'error', detail: string): void {
       (kind === 'error'
         ? 'background:#3a1414;color:#ffb4b4;border:1px solid #ff6b6b'
         : 'background:#16291d;color:#8cd9a5;border:1px solid #3d6b4a');
-    el.textContent = `Video Scopes [${kind}] ${detail}`;
+    el.textContent = `Web Video Scope [${kind}] ${detail}`;
     document.documentElement.appendChild(el);
     setTimeout(() => el?.remove(), 12000);
   }
@@ -63,13 +76,15 @@ let state: HudState = { ...DEFAULT_STATE };
 let unfollowFullscreen: (() => void) | null = null;
 let guardian: Guardian | null = null;
 let reattachCount = 0;
-let lastDisableReason = 'none';
 let floating: FloatingWindow | null = null;
-/** The HUD living in the floating window, if any. */
 let floatingHud: Hud | null = null;
 let probe: Probe | null = null;
+let probeTooltip: CursorProbeTooltip | null = null;
+let lastProbeSample: ProbeSample | null = null;
+let lastProbeClient = { x: 0, y: 0 };
 let probedVideo: HTMLVideoElement | null = null;
 let readability: Readability = { kind: 'unknown' };
+let lastHdrStats: HdrFrameStats | null = null;
 
 let colorInfo: ColorSpaceInfo = {
   fullRange: null,
@@ -87,12 +102,6 @@ const timer = new GpuTimer();
 let frameCount = 0;
 let lastPerfAt = performance.now();
 let lastColorProbeAt = 0;
-/**
- * `new VideoFrame(video)` is not free — it takes a reference on the decoder's
- * current frame and synchronises with the media pipeline. Probing it every
- * frame measurably hurt throughput, so colour metadata is re-read at most 4
- * times per second, which is far faster than a source can switch in practice.
- */
 const COLOR_PROBE_INTERVAL_MS = 250;
 
 // ---------------------------------------------------------------------------
@@ -103,88 +112,321 @@ function currentTier(): QualityTier {
   return (state.lockedTier ?? governor.tier) as QualityTier;
 }
 
-function optionsForMode(mode: ScopeMode): ScopeOptions {
+function resolvedMatrix() {
+  if (state.matrixMode && state.matrixMode !== 'auto') return state.matrixMode;
+  if (colorInfo.matrix) return colorInfo.matrix;
+  if (state.primariesMode === 'rec2020' || colorInfo.primaries === 'rec2020') return 'bt2020';
+  return 'bt709';
+}
+
+function currentSourceTransfer(): 'sdr' | 'pq' | 'hlg' {
+  if (colorInfo.transfer === 'pq') return 'pq';
+  if (colorInfo.transfer === 'hlg') return 'hlg';
+  return 'sdr';
+}
+
+function currentEffectiveTransfer(): 'sdr' | 'pq' | 'hlg' {
+  return resolveEffectiveTransfer(state.hdrMode ?? 'auto', colorInfo.transfer);
+}
+
+function resolvedPrimaries(effectiveTransfer = currentEffectiveTransfer()): PrimariesId {
+  if (state.primariesMode && state.primariesMode !== 'auto') return state.primariesMode;
+  if (colorInfo.primaries) return colorInfo.primaries;
+  return effectiveTransfer !== 'sdr' ? 'rec2020' : 'rec709';
+}
+
+function optionsForSlot(slot: number, fallbackMode: ScopeMode): ScopeOptions {
+  const cells = resolveCells(state);
+  const cell = cells[slot];
+  const mode = cell?.mode ?? fallbackMode;
+  const matrix = resolvedMatrix();
+  const sourceMatrix = colorInfo.matrix ?? matrix;
+  const sourceTransfer = currentSourceTransfer();
+  const effectiveTransfer = currentEffectiveTransfer();
+  const primaries = resolvedPrimaries(effectiveTransfer);
+
+  let gamuts = cell?.gamuts ? [...cell.gamuts] : [...state.gamuts];
+  if (primaries === 'rec2020' && !gamuts.includes('rec2020')) {
+    gamuts = [...gamuts, 'rec2020'];
+  }
+
+  const wc = cell?.waveChannels ?? (mode === 'waveform-rgb' ? 'RGB' : 'Y');
+  const chIdx: 0 | 1 | 2 | 3 = wc === 'R' ? 1 : wc === 'G' ? 2 : wc === 'B' ? 3 : 0;
+
   return {
     ...DEFAULT_SCOPE_OPTIONS,
     mode,
-    gain: state.gain,
-    gamma: state.gamma,
-    zoom: state.zoom,
-    units: state.units,
+    channel: chIdx,
+    waveChannels: wc,
+    paradeMode: cell?.paradeMode ?? 'RGB',
+    histMode: cell?.histMode ?? 'YRGB',
+    traceMode: cell?.traceMode ?? (mode === 'vectorscope' || mode === 'cie' ? 'colorize' : 'channel'),
+    lowPass: cell?.lowPass ?? false,
+    toneFilter: cell?.toneFilter ?? 'all',
+    showSkinLine: cell?.showSkinLine ?? true,
+    gain: cell?.gain ?? state.gain,
+    gamma: cell?.gamma ?? state.gamma,
+    zoom: cell?.zoom ?? 1,
+    panX: cell?.panX ?? null,
+    panY: cell?.panY ?? null,
+    units: resolveEffectiveUnit(cell?.units ?? state.units, effectiveTransfer),
     range: effectiveRange,
-    matrix: colorInfo.matrix ?? 'bt709',
-    primaries: colorInfo.primaries ?? 'rec709',
-    coord: state.coord,
+    matrix,
+    sourceMatrix,
+    barTargets: cell?.barTargets ?? state.barTargets ?? 0.75,
+    primaries,
+    gamuts,
+    coord: cell?.coord ?? state.coord,
     signalKind: state.signalMode,
+    sourceTransfer,
+    effectiveTransfer,
+    nitLow: state.nitLow ?? 100,
+    nitHigh: state.nitHigh ?? 1000,
+    graticuleBrightness: state.graticuleBrightness ?? 1,
+  };
+}
+
+function falseColorConfig(): FalseColorConfig {
+  return {
+    enabled: !!state.videoFalseColor,
+    preset: state.falseColorPreset ?? 'auto',
+    opacity: state.falseColorOpacity ?? 0.88,
+    showLegend: state.falseColorLegend !== false,
+    lang: state.lang ?? 'en',
+    sdrWhiteNits: state.sdrWhiteNits ?? 203,
+    nitLow: state.nitLow ?? 100,
+    nitHigh: state.nitHigh ?? 1000,
+    matrix: resolvedMatrix(),
+    range: effectiveRange,
+    signalKind: state.signalMode,
+    sourceTransfer: currentSourceTransfer(),
+    effectiveTransfer: currentEffectiveTransfer(),
+    displayTransferFix: resolveDisplayTransferFix(colorInfo.transfer),
   };
 }
 
 function analysisPreset(): AnalysisPreset {
+  if (state.precision && state.precision !== 'auto') {
+    return state.precision;
+  }
   return TIER_DESCRIPTION[currentTier()].preset;
 }
 
 function applyTier(tier: QualityTier): void {
   const d = TIER_DESCRIPTION[tier];
-  loop?.setTargetFps(d.fps);
-  controller?.setMinInterval(1000 / d.fps);
-
-  // Quality tiers adjust workload — frame rate and analysis resolution — and
-  // nothing else. They used to also force a layout, which silently overrode the
-  // user's choice: picking a single scope switched to `single`, then the next
-  // governor tick reverted it to `grid`. Which panels are on screen is a user
-  // decision, not a performance knob.
+  const fps = state.precision === 'ultra' || state.precision === 'native' ? Math.max(30, d.fps) : d.fps;
+  loop?.setTargetFps(fps);
+  controller?.setMinInterval(1000 / fps);
   void saveSettings(state);
 }
 
+function computeHdrBadgeInfo(): {
+  highPct: number;
+  maxNits: number;
+  active: boolean;
+  nitHigh: number;
+} {
+  const effTr = currentEffectiveTransfer();
+  const cells = resolveCells(state);
+  const anyZoneCell = cells.some(
+    (c) => c.traceMode === 'hdr-zones' || c.units === 'nits' || c.units === 'hlg',
+  );
+  const active =
+    effTr !== 'sdr' ||
+    anyZoneCell ||
+    (!!state.videoFalseColor && state.falseColorPreset === 'hdr-nits');
+  const highPct =
+    lastHdrStats && lastHdrStats.totalPx > 0
+      ? (lastHdrStats.highPx / lastHdrStats.totalPx) * 100
+      : 0;
+  return {
+    highPct,
+    maxNits: lastHdrStats?.maxNits ?? 0,
+    active,
+    nitHigh: state.nitHigh ?? 1000,
+  };
+}
+
+function syncProbeOutputs(sample: ProbeSample | null, clientX: number, clientY: number): void {
+  lastProbeSample = sample;
+  if (sample) {
+    lastProbeClient = { x: clientX, y: clientY };
+  }
+  const pc = state.probeConfig ?? DEFAULT_PROBE_CONFIG;
+  if (!sample) {
+    probeTooltip?.hide();
+    controller?.drawProbeRings(null);
+    activeHud()?.setProbe(null);
+    return;
+  }
+
+  const effTr = currentEffectiveTransfer();
+  probeTooltip?.show(clientX, clientY, sample, pc, effTr, state.lang ?? 'en');
+  controller?.drawProbeRings(pc.showScopeRings ? sample : null);
+
+  if (!state.eyedropperEnabled) {
+    const effUnit = resolveEffectiveUnit(state.units, effTr);
+    activeHud()?.setProbe(formatSample(sample, effUnit, effectiveRange));
+  } else {
+    activeHud()?.setProbe(null);
+  }
+}
+
 function refreshHud(): void {
+  const diagnosis = sanitizeRangeDiagnosis(
+    rangeDetector.current,
+    state.signalMode,
+    state.rangeMode,
+  );
+  effectiveRange = applyRangeMode(state.rangeMode, colorInfo, diagnosis);
+  const effTr = currentEffectiveTransfer();
+  const axisLabel =
+    effTr === 'pq'
+      ? 'PQ nits'
+      : effTr === 'hlg'
+        ? 'HLG'
+        : effectiveRange.limited
+          ? 'limited'
+          : 'full';
   activeHud()?.setState(state);
   activeHud()?.setColorInfo(colorInfo);
-  controller?.setOptionsFor(optionsForMode);
+  activeHud()?.setDiagnosis(
+    {
+      ...diagnosis,
+      effective: effectiveRange.limited ? 'limited' : 'full',
+      effectiveAxisLabel: axisLabel,
+    },
+    computeHdrBadgeInfo(),
+  );
+  controller?.setOptionsFor(optionsForSlot);
+}
+
+function syncVideoColorSpace(video: HTMLVideoElement): void {
+  if (video.readyState < 2) return;
+  const info = readVideoColorSpace(video);
+  if (
+    info.source !== colorInfo.source ||
+    info.matrix !== colorInfo.matrix ||
+    info.fullRange !== colorInfo.fullRange ||
+    info.format !== colorInfo.format ||
+    info.primaries !== colorInfo.primaries ||
+    info.transfer !== colorInfo.transfer
+  ) {
+    colorInfo = info;
+    refreshHud();
+  }
+}
+
+function requestRedraw(): void {
+  const video = detector?.video;
+  if (!video || !controller) return;
+  syncVideoColorSpace(video);
+  void controller
+    .frame(video, true)
+    .then(() => syncRuntimeNotice())
+    .catch(() => {
+      /* ignore transient redraw errors */
+    });
 }
 
 // ---------------------------------------------------------------------------
 // frame pipeline
 // ---------------------------------------------------------------------------
 
-function onDiagnosis(hist: Uint32Array, total: number): void {
-  const diagnosis = rangeDetector.push(colorInfo, histogramStats(hist, total));
+function onDiagnosis(hist: Uint32Array, total: number, hdr?: HdrFrameStats): void {
+  if (hdr) lastHdrStats = hdr;
+  const rawDiagnosis = rangeDetector.push(colorInfo, histogramStats(hist, total));
+  const diagnosis = sanitizeRangeDiagnosis(rawDiagnosis, state.signalMode, state.rangeMode);
   const next = applyRangeMode(state.rangeMode, colorInfo, diagnosis);
   const changed = next.limited !== effectiveRange.limited || next.depth !== effectiveRange.depth;
   effectiveRange = next;
 
-  // Report what the scopes are actually drawing on, derived from the same value
-  // handed to the renderer. Showing the detector's verdict instead let the badge
-  // claim "axis:limited" while the shader plotted on a full-range axis, which is
-  // how a legal white reading reached 119 IRE with no explanation.
-  activeHud()?.setDiagnosis({ ...diagnosis, effective: effectiveRange.limited ? 'limited' : 'full' });
+  const effTr = currentEffectiveTransfer();
+  const axisLabel =
+    effTr === 'pq'
+      ? 'PQ nits'
+      : effTr === 'hlg'
+        ? 'HLG'
+        : effectiveRange.limited
+          ? 'limited'
+          : 'full';
 
-  if (changed) controller?.setOptionsFor(optionsForMode);
+  activeHud()?.setDiagnosis(
+    {
+      ...diagnosis,
+      effective: effectiveRange.limited ? 'limited' : 'full',
+      effectiveAxisLabel: axisLabel,
+    },
+    computeHdrBadgeInfo(),
+  );
+
+  if (changed) {
+    controller?.setOptionsFor(optionsForSlot);
+    if (detector?.video?.paused) requestRedraw();
+  }
 }
 
-async function onFrameSubmitted(): Promise<void> {
-  const device = await getDevice().catch(() => null);
-  if (!device) return;
-  const ms = await timer.sample(device);
-
-  if (state.lockedTier === null) {
-    const next = stepGovernorHard(governor, ms);
-    if (next.tier !== governor.tier) {
-      governor = next;
-      applyTier(governor.tier);
-    } else {
-      governor = next;
+function syncRuntimeNotice(): void {
+  const h = activeHud();
+  if (!h || !detector?.video) return;
+  if (readability.kind !== 'readable' && !controller?.analysisDims) {
+    h.setNotice(readabilityNotice(readability, true));
+    return;
+  }
+  if (state.videoFalseColor && controller) {
+    const fc = controller.falseColorDiagnostics;
+    if (fc.status === 'offscreen') {
+      h.setNotice(t(state.lang).fcOffscreenHint);
+      return;
+    }
+    if (fc.status === 'gpu-error' && fc.gpuError) {
+      h.setNotice(`False Color GPU error: ${fc.gpuError}`);
+      return;
     }
   }
+  if (controller?.analysisDims) {
+    h.setNotice(null);
+  }
+}
 
+let warmupFrames = 0;
+
+async function onFrameSubmitted(hadReadback = false): Promise<void> {
+  if (detector?.video?.paused) {
+    syncRuntimeNotice();
+    return;
+  }
   frameCount += 1;
   const now = performance.now();
   if (now - lastPerfAt > 500) {
-    const fps = (frameCount * 1000) / (now - lastPerfAt);
-    activeHud()?.setPerf(fps, timer.lastMs, currentTier(), controller?.uploadPath);
-    const dims = controller?.analysisDims;
-    if (dims) activeHud()?.setNotice(null);
+    const fps = detector?.video?.paused ? 0 : (frameCount * 1000) / (now - lastPerfAt);
+    activeHud()?.setPerf(
+      fps,
+      timer.lastMs,
+      currentTier(),
+      controller?.uploadPath,
+      controller?.analysisDims,
+    );
+    syncRuntimeNotice();
     frameCount = 0;
     lastPerfAt = now;
+  }
+
+  warmupFrames += 1;
+  if (!hadReadback && warmupFrames > 4) {
+    const device = await getDevice().catch(() => null);
+    if (!device) return;
+    const ms = await timer.sample(device);
+
+    if (state.lockedTier === null && state.precision === 'auto') {
+      const next = stepGovernorHard(governor, ms);
+      if (next.tier !== governor.tier) {
+        governor = next;
+        applyTier(governor.tier);
+      } else {
+        governor = next;
+      }
+    }
   }
 }
 
@@ -195,22 +437,11 @@ function onFrame(): void {
   const now = performance.now();
   if (now - lastColorProbeAt >= COLOR_PROBE_INTERVAL_MS) {
     lastColorProbeAt = now;
-    const info = readVideoColorSpace(video);
-    if (
-      info.source !== colorInfo.source ||
-      info.matrix !== colorInfo.matrix ||
-      info.fullRange !== colorInfo.fullRange ||
-      info.format !== colorInfo.format ||
-      info.primaries !== colorInfo.primaries ||
-      info.transfer !== colorInfo.transfer
-    ) {
-      colorInfo = info;
-      activeHud()?.setColorInfo(colorInfo);
-      controller.setOptionsFor(optionsForMode);
-    }
+    syncVideoColorSpace(video);
   }
 
   controller.resize();
+  probe?.refreshAtLastPointer();
   void controller.frame(video).catch(() => {
     /* a failed frame must not kill the loop */
   });
@@ -222,16 +453,17 @@ function onFrame(): void {
 
 function buildController(): void {
   controller?.destroy();
+  warmupFrames = 0;
   controller = new ScopeController(
     activeHud()?.panelCanvases() ?? [],
-    optionsForMode,
+    optionsForSlot,
     { onDiagnosis, onFrameSubmitted },
     () => state.gamuts,
     analysisPreset,
+    falseColorConfig,
   );
   controller.setMinInterval(1000 / TIER_DESCRIPTION[currentTier()].fps);
   controller.setSignalMode(state.signalMode);
-  // Test seam: expose the range the renderer was actually constructed with.
   (window as unknown as { __scopeDebug?: unknown }).__scopeDebug = {
     get range() {
       return effectiveRange.limited ? 'limited' : 'full';
@@ -239,83 +471,187 @@ function buildController(): void {
     get effective() {
       return state.rangeMode;
     },
+    get dims() {
+      return controller?.analysisDims ?? null;
+    },
+    get transfer() {
+      return currentEffectiveTransfer();
+    },
+    get primaries() {
+      return resolvedPrimaries();
+    },
+    get status() {
+      return presentationStatus;
+    },
+    get reattachCount() {
+      return reattachCount;
+    },
+    get falseColor() {
+      return {
+        enabled: !!state.videoFalseColor,
+        preset: state.falseColorPreset ?? 'auto',
+        ...(controller?.falseColorDiagnostics ?? {}),
+      };
+    },
   };
   controller.onRawError = (msg) => activeHud()?.setNotice(`Raw mode unavailable: ${msg}`);
 }
 
-async function enable(): Promise<void> {
-  if (enabled) return;
+let presentationStatus = 'idle';
+let enablePromise: Promise<void> | null = null;
+
+function enable(): Promise<void> {
+  if (enablePromise) return enablePromise;
+  if (enabled) return Promise.resolve();
   enabled = true;
 
-  // Mount FIRST, with whatever state we already have. Everything below this
-  // point can fail — storage, GPU init, video detection — and the panel will
-  // still be on screen showing what went wrong. Putting any `await` before the
-  // mount meant a storage hiccup produced no panel at all, which reads as a
-  // completely broken extension.
-  state = { ...state, visible: true };
-  hud = buildHud();
-  hud.mount();
-  stampTitle('hud-mounted');
+  enablePromise = (async () => {
+    state = { ...state, visible: true };
+    hud = buildHud();
+    hud.mount();
+    presentationStatus = 'in-page';
 
-  // Remember the opt-in for the rest of this browser session, so switching to
-  // another video tab does not need another click. Session scope means closing
-  // the browser returns to the off state — no permanent background cost.
-  try {
-    await chrome.storage.session.set({ scopesOn: true });
-  } catch {
-    // Non-fatal: the panel still works, it just will not auto-restore.
-  }
+    try {
+      await chrome.storage.session.set({ scopesOn: true });
+    } catch {
+      // Non-fatal
+    }
 
-  // Now the optional work. Failures here degrade the scopes, not the panel.
-  try {
-    state = { ...(await loadSettings()), visible: true, layout: state.layout };
-    hud.setState(state);
-  } catch {
-    // Keep the defaults already in use.
-  }
-  void saveSettings(state);
+    try {
+      state = { ...(await loadSettings()), visible: true, layout: state.layout };
+      hud.setState(state);
+    } catch {
+      // Keep defaults
+    }
+    void saveSettings(state);
 
-  finishEnable();
+    finishEnable();
+  })().finally(() => {
+    enablePromise = null;
+  });
+
+  return enablePromise;
 }
 
-/** Handlers for a freshly created HUD. Split out so mount can precede I/O. */
-/** Handlers shared by the in-page HUD and the one in the floating window. */
 function buildHandlers(): HudHandlers {
   return {
     onStateChange(patch) {
       const signalChanged = patch.signalMode !== undefined && patch.signalMode !== state.signalMode;
       const modeChanged = patch.mode !== undefined && patch.mode !== state.mode;
+      const precisionChanged = patch.precision !== undefined && patch.precision !== state.precision;
+      const eyeChanged = patch.eyedropperEnabled !== undefined;
+      const probeCfgChanged = patch.probeConfig !== undefined || patch.lang !== undefined;
+      const hdrChanged =
+        patch.hdrMode !== undefined ||
+        patch.nitLow !== undefined ||
+        patch.nitHigh !== undefined ||
+        patch.matrixMode !== undefined ||
+        patch.primariesMode !== undefined;
       state = { ...state, ...patch };
       void saveSettings(state);
-      if (signalChanged) controller?.setSignalMode(state.signalMode);
+      if (signalChanged) {
+        rangeDetector.reset();
+        controller?.setSignalMode(state.signalMode);
+      }
+      if (precisionChanged) {
+        lastPerfAt = performance.now() - 480;
+        frameCount = Math.max(1, Math.round((480 / 1000) * TIER_DESCRIPTION[currentTier()].fps));
+        applyTier(currentTier());
+      }
+      if (hdrChanged) controller?.invalidateStats();
       if (modeChanged) {
-        // Highlight only. Cell rebuilds belong to onLayoutChange, which the
-        // caller invokes explicitly; rebuilding here raced with it and the
-        // loser overwrote the grid with the old layout.
         activeHud()?.setSingleMode(state.mode);
+        controller?.setTargets(activeHud()?.panelCanvases() ?? []);
+      }
+      if (eyeChanged) {
+        probe?.syncMode();
+      } else if (probeCfgChanged && lastProbeSample) {
+        syncProbeOutputs(lastProbeSample, lastProbeClient.x, lastProbeClient.y);
       }
       refreshHud();
+      requestRedraw();
+    },
+    onCellChange(layout: Layout, slot: number, patch: Partial<CellConfig>) {
+      const cells = resolveCells(state, layout);
+      if (!cells[slot]) return;
+      const prevMode = cells[slot]!.mode;
+      cells[slot] = { ...cells[slot]!, ...patch };
+      const nextModes = cells.map((c) => c.mode);
+      state = {
+        ...state,
+        activeSlot: slot,
+        cells: { ...state.cells, [layout]: cells },
+        panels: { ...state.panels, [layout]: nextModes },
+        ...(layout === 'single' && slot === 0 ? { mode: cells[0]!.mode } : {}),
+      };
+      void saveSettings(state);
+      if (cells[slot]!.mode !== prevMode) {
+        controller?.setTargets(activeHud()?.panelCanvases() ?? []);
+      }
+      refreshHud();
+      requestRedraw();
+    },
+    onCellsReplace(layout: Layout, cells: CellConfig[]) {
+      const nextModes = cells.map((c) => c.mode);
+      state = {
+        ...state,
+        layout,
+        cells: { ...state.cells, [layout]: cells },
+        panels: { ...state.panels, [layout]: nextModes },
+        ...(layout === 'single' && cells[0] ? { mode: cells[0].mode } : {}),
+      };
+      void saveSettings(state);
+      activeHud()?.relayout(layout);
+      controller?.setTargets(activeHud()?.panelCanvases() ?? []);
+      refreshHud();
+      requestRedraw();
     },
     onPanelsChange(layout, panels) {
-      state = { ...state, layout, panels: { ...state.panels, [layout]: panels } };
+      const curCells = resolveCells(state, layout);
+      const nextCells = panels.map((m, i) =>
+        curCells[i] && curCells[i]!.mode === m ? curCells[i]! : { ...curCells[i]!, mode: m },
+      );
+      state = {
+        ...state,
+        layout,
+        panels: { ...state.panels, [layout]: panels },
+        cells: { ...state.cells, [layout]: nextCells },
+      };
       void saveSettings(state);
-      // Same order as onLayoutChange: rebuild cells first, then hand the new
-      // canvases to the controller. Handing over stale canvases leaves a panel
-      // drawing into an element that is no longer in the document.
       activeHud()?.relayout(layout);
       controller?.setTargets(activeHud()?.panelCanvases() ?? []);
-      controller?.setOptionsFor(optionsForMode);
+      controller?.setOptionsFor(optionsForSlot);
+      requestRedraw();
     },
     onLayoutChange(layout: Layout) {
-      state = { ...state, layout };
+      state = { ...state, layout, activeSlot: 0 };
       void saveSettings(state);
-      // One pass: push state, rebuild the cells, then hand the new canvases to
-      // the controller. Calling setState again afterwards re-synced inputs but
-      // also re-ran the mode highlight, which could re-assert the old grid.
       activeHud()?.relayout(layout);
       controller?.setTargets(activeHud()?.panelCanvases() ?? []);
-      controller?.setOptionsFor(optionsForMode);
+      controller?.setOptionsFor(optionsForSlot);
+      requestRedraw();
+    },
+    onResetAll() {
+      const keepLang = state.lang;
+      const keepPos = state.hostPosition;
+      state = {
+        ...DEFAULT_STATE,
+        visible: true,
+        lang: keepLang,
+        hostPosition: keepPos,
+        probeConfig: { ...DEFAULT_PROBE_CONFIG },
+      };
       void saveSettings(state);
+      probe?.syncMode();
+      activeHud()?.relayout(state.layout);
+      controller?.setSignalMode(state.signalMode);
+      controller?.setTargets(activeHud()?.panelCanvases() ?? []);
+      refreshHud();
+      requestRedraw();
+    },
+    onResize() {
+      controller?.resize();
+      requestRedraw();
     },
     onClose() {
       void disable();
@@ -328,124 +664,109 @@ function buildHandlers(): HudHandlers {
       state = { ...state, lockedTier: locked ? currentTier() : null };
       void saveSettings(state);
       activeHud()?.setState(state);
-      activeHud()?.setPerf(0, timer.lastMs, currentTier());
+      activeHud()?.setPerf(
+        0,
+        timer.lastMs,
+        currentTier(),
+        controller?.uploadPath,
+        controller?.analysisDims,
+      );
     },
   };
 }
 
-/** The panel shown in the page. */
 function buildHud(): Hud {
   return new Hud(state, buildHandlers());
 }
 
-/** The panel shown in the floating window, when one is open. */
 function activeHud(): Hud | null {
   return floatingHud ?? hud;
 }
 
-/**
- * Everything that can fail without taking the panel down with it.
- * Called right after the HUD is mounted, so any throw still leaves a visible
- * panel that can explain itself.
- */
 function finishEnable(): void {
   const mounted = activeHud()?.hostElement;
   if (!mounted) {
-    // enable() was torn down between mount and this call (a fast close, or a
-    // second enable racing the first). Nothing to wire up.
-    stampTitle('finish-skipped');
+    presentationStatus = 'finish-skipped';
     return;
   }
 
   try {
-    unfollowFullscreen = followFullscreen(mounted);
+    unfollowFullscreen = followFullscreen(mounted, () => {
+      controller?.resize();
+      requestRedraw();
+    });
 
-    // Pages that rebuild their DOM after load (YouTube's hydration) detach the
-    // host as collateral. Re-attach whenever that happens, and report the count
-    // so this failure mode is visible instead of silent.
     guardian = keepAttached(
       mounted,
-      () => document.fullscreenElement ?? document.documentElement,
+      overlayFullscreenParent,
       (n) => {
         reattachCount = n;
       },
     );
 
     buildController();
-    stampTitle('controller-ready');
 
+    probeTooltip = new CursorProbeTooltip();
     probe = new Probe(
-    (sample) => activeHud()?.setProbe(formatSample(sample, state.units, effectiveRange)),
-    () => ({ matrix: colorInfo.matrix ?? 'bt709', range: effectiveRange }),
-  );
+      (sample, clientX, clientY) => {
+        syncProbeOutputs(sample, clientX, clientY);
+      },
+      () => ({
+        eyedropperEnabled: !!state.eyedropperEnabled,
+        matrix: resolvedMatrix(),
+        primaries: resolvedPrimaries(),
+        range: effectiveRange,
+        effectiveTransfer: currentEffectiveTransfer(),
+        sourceTransfer: currentSourceTransfer(),
+        sdrWhiteNits: state.sdrWhiteNits ?? 203,
+        hudHostId: HOST_ID,
+      }),
+    );
 
-  detector = new VideoDetector((video) => {
-    loop?.stop();
-    loop = null;
-    if (probedVideo && probe) probe.disable(probedVideo);
-    probedVideo = video;
-    if (!video) {
-      readability = { kind: 'unknown' };
-      activeHud()?.setNotice('No video found on this page.');
-      stampTitle('no-video');
-      return;
-    }
-    stampTitle('video-found');
-    // Tell the user *why* a scope would be empty, instead of showing a blank
-    // panel that looks broken.
-    readability = videoReadability(video);
-    activeHud()?.setNotice(readabilityNotice(readability, true));
-    if (readability.kind === 'readable') probe?.enable(video);
-    loop = new FrameLoop(video, onFrame);
-    loop.setTargetFps(TIER_DESCRIPTION[currentTier()].fps);
-    loop.start();
-  });
-  detector.start();
-    stampTitle(detector.video ? 'detector-video' : 'detector-novideo');
-    stampGeometry('geo');
-    // Continuous trace: a single sample cannot distinguish "never mounted" from
-    // "mounted then removed then re-attached". Each line records connectivity,
-    // parent, re-attach count and whether the panel is still enabled.
-    // Keep the whole timeline. Overwriting each second destroyed the evidence:
-    // by the time the user ran the reader, only the final state remained, and
-    // "absent" could mean never-mounted or mounted-then-closed.
-    const history: string[] = [];
-    const trace = setInterval(() => {
-      const h = document.getElementById(HOST_ID);
-      const r = h?.getBoundingClientRect();
-      const seg =
-        (h ? (h.isConnected ? 'conn' : 'detach') : 'ABSENT') +
-        (r ? `@${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}` : '') +
-        `,en=${enabled ? 1 : 0},re=${reattachCount},dis=${h ? getComputedStyle(h).display : '-'}`;
-      history.push(seg);
-      // Keep the last 6 samples; longer than that and the title gets unwieldy.
-      stampTitle('trace', history.slice(-6).join(' > '));
-      if (history.length >= 10) clearInterval(trace);
-    }, 1000);
+    detector = new VideoDetector((video) => {
+      loop?.stop();
+      loop = null;
+      if (probedVideo && probe) probe.disable(probedVideo);
+      probedVideo = video;
+      if (!video) {
+        readability = { kind: 'unknown' };
+        activeHud()?.setNotice('No video found on this page.');
+        return;
+      }
+      readability = videoReadability(video);
+      activeHud()?.setNotice(readabilityNotice(readability, true));
+      if (readability.kind === 'readable') probe?.enable(video);
+      if (video.readyState >= 2) {
+        syncVideoColorSpace(video);
+      } else {
+        video.addEventListener('loadeddata', () => syncVideoColorSpace(video), { once: true });
+      }
+      video.addEventListener('pause', () => {
+        frameCount = 0;
+        activeHud()?.setPerf(
+          0,
+          timer.lastMs,
+          currentTier(),
+          controller?.uploadPath,
+          controller?.analysisDims,
+        );
+      });
+      loop = new FrameLoop(video, onFrame);
+      loop.setTargetFps(TIER_DESCRIPTION[currentTier()].fps);
+      loop.start();
+    });
+    detector.start();
     if (!detector.video) activeHud()?.setNotice('No video found on this page.');
   } catch (e) {
-    // The panel is already on screen, so report here instead of throwing.
     const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
     activeHud()?.setNotice(`Scopes failed to start: ${msg}`);
-    stampTitle('scopes-failed');
+    presentationStatus = 'scopes-failed';
     console.error('[video-scopes] finishEnable failed:', msg);
   }
 }
 
 async function disable(): Promise<void> {
   if (!enabled) return;
-  // Record the caller: a close the user asked for and one triggered by our own
-  // recovery path look identical otherwise.
-  const who = (new Error().stack ?? '')
-    .split('\n')
-    .slice(1, 4)
-    .map((l) => l.trim().replace(/^at\s+/, '').split(' ')[0])
-    .join('<');
-  try {
-    lastDisableReason = who;
-  } catch {
-    // ignore
-  }
   enabled = false;
   loop?.stop();
   loop = null;
@@ -461,16 +782,20 @@ async function disable(): Promise<void> {
   unfollowFullscreen = null;
   if (probedVideo && probe) probe.disable(probedVideo);
   probe = null;
+  probeTooltip?.destroy();
+  probeTooltip = null;
+  lastProbeSample = null;
   probedVideo = null;
   activeHud()?.unmount();
   hud = null;
-  stampTitle('closed');
+  presentationStatus = 'closed';
   rangeDetector.reset();
+  colorInfo = { ...UNKNOWN_COLOR_SPACE };
+  lastHdrStats = null;
+  lastColorProbeAt = 0;
   governor = initialGovernorState();
 
   state = { ...state, visible: false };
-  // Closing is an explicit opt-out for the rest of the session: tearing down
-  // the GPU work and leaving it off is the whole point.
   try {
     await chrome.storage.session.set({ scopesOn: false });
   } catch {
@@ -478,77 +803,27 @@ async function disable(): Promise<void> {
   }
 }
 
-function toggle(): void {
-  void (enabled ? disable() : enable());
+if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+  chrome.runtime.onMessage.addListener((msg: { type?: string }) => {
+    if (msg?.type === 'show-scopes' || msg?.type === 'toggle-scopes') {
+      ensureVisible();
+    } else if (msg?.type === 'hotkey-toggle-scopes') {
+      if (enabled) {
+        void disable();
+      } else {
+        ensureVisible();
+      }
+    }
+  });
 }
 
-/**
- * Reflect state in document.title so the extension's health can be read without
- * a screenshot. Only writes while the HUD exists, and restores on unmount.
- */
-function stampTitle(status: string, extra?: string): void {
-  const marker = ' [VS:';
-  const base = document.title.replace(/ \[VS:[^\]]*\]$/, '');
-  document.title = `${base}${marker}${status}${extra ? '|' + extra : ''}]`;
-}
-
-/** Dump the panel's geometry into the title so an invisible panel reports why. */
-function stampGeometry(tag: string): void {
-  const h = document.getElementById(HOST_ID);
-  if (!h) {
-    stampTitle(`${tag}-nohost`);
-    return;
-  }
-  const r = h.getBoundingClientRect();
-  const panel = h.shadowRoot?.querySelector('.panel') as HTMLElement | null;
-  const pr = panel?.getBoundingClientRect();
-  const cs = getComputedStyle(h);
-  // A transform/filter/perspective/contain on an ancestor makes fixed
-  // positioning resolve against that ancestor instead of the viewport, which
-  // silently moves the panel. YouTube is known to touch these.
-  const culprits: string[] = [];
-  for (const el of [document.documentElement, document.body]) {
-    if (!el) continue;
-    const s2 = getComputedStyle(el);
-    const why: string[] = [];
-    if (s2.transform !== 'none') why.push('transform=' + s2.transform);
-    if (s2.filter !== 'none') why.push('filter=' + s2.filter);
-    if (s2.perspective !== 'none') why.push('perspective');
-    if (s2.contain !== 'none') why.push('contain=' + s2.contain);
-    if (s2.willChange !== 'auto') why.push('will-change=' + s2.willChange);
-    if (why.length) culprits.push(`${el.tagName.toLowerCase()}:${why.join('+')}`);
-  }
-
-  const bits = [
-    `host=${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}`,
-    `vh=${window.innerHeight}`,
-    `disp=${cs.display}`,
-    `vis=${cs.visibility}`,
-    `zi=${cs.zIndex}`,
-    panel ? `panel=${Math.round(pr!.width)}x${Math.round(pr!.height)}` : 'panel=MISSING',
-    `kids=${h.shadowRoot?.children.length ?? 0}`,
-    culprits.length ? `CONTEXT:${culprits.join(',')}` : 'ctx=clean',
-  ];
-  stampTitle(tag, bits.join(','));
-}
-
-chrome.runtime.onMessage.addListener((msg: { type?: string }) => {
-  if (msg?.type === 'show-scopes' || msg?.type === 'toggle-scopes') {
-    // Deliberately `ensureVisible`, not `toggle`: someone clicking the toolbar
-    // icon is asking to see the panel. If it is already mounted they get it
-    // re-attached and brought to the front instead of it disappearing.
-    ensureVisible();
-  }
-});
-
-/**
- * Guarantee the panel is on screen. Used by the toolbar icon, whose intent is
- * "show me the scopes", never "hide them".
- */
 function ensureVisible(): void {
   if (!enabled) {
-    // Enable first, then detach: the HUD must be mounted before it can move.
     void enable().then(() => detachToFloatingWindow());
+    return;
+  }
+  if (enablePromise) {
+    void enablePromise.then(() => detachToFloatingWindow());
     return;
   }
   if (floating?.isOpen()) {
@@ -560,24 +835,9 @@ function ensureVisible(): void {
     void disable().then(() => enable().then(() => detachToFloatingWindow()));
     return;
   }
-  // Prefer the floating window: it is immune to the page's DOM surgery,
-  // stacking contexts and z-index wars, which is what kept making the in-page
-  // panel invisible.
   void detachToFloatingWindow();
 }
 
-/**
- * Move the panel into an always-on-top window. Falls back to keeping it in the
- * page (and says so) when the API is unavailable.
- */
-/**
- * Move the panel into an always-on-top window.
- *
- * The HUD is rebuilt inside that window rather than moved into it. A WebGPU
- * canvas context belongs to the document that configured it, so adopting a
- * canvas into a PiP document kills the context: the panel would appear with a
- * drawn graticule and no trace. Only a HUD created by that document works.
- */
 async function detachToFloatingWindow(): Promise<void> {
   if (floating?.isOpen()) {
     floating.window.focus();
@@ -591,27 +851,26 @@ async function detachToFloatingWindow(): Promise<void> {
 
   try {
     floating = await openFloatingWindow({
-      width: Math.min(900, Math.round(window.screen.availWidth * 0.5)),
-      height: Math.min(680, Math.round(window.screen.availHeight * 0.72)),
+      width: Math.min(920, Math.round(window.screen.availWidth * 0.52)),
+      height: Math.min(700, Math.round(window.screen.availHeight * 0.74)),
       onClosed: () => {
         floating = null;
         floatingHud?.unmount();
         floatingHud = null;
-        controller?.setTargets(activeHud()?.panelCanvases() ?? []);
-        stampTitle('returned');
+        if (enabled && !hud) {
+          void disable();
+        } else {
+          controller?.setTargets(activeHud()?.panelCanvases() ?? []);
+          presentationStatus = 'returned';
+        }
       },
     });
 
-    // Tear down the in-page panel first: leaving it mounted put two panels in the
-    // document at once (the page's and the window's), which looked like one panel
-    // nested inside another and doubled the GPU work.
     guardian?.stop();
     guardian = null;
     hud?.unmount();
     hud = null;
 
-    // Build a fresh HUD inside the window's document. Its canvases are created
-    // there, so their GPU contexts are valid.
     floatingHud = new Hud(
       { ...state, hostPosition: { left: 0, top: 0, right: 0 } },
       buildHandlers(),
@@ -620,52 +879,71 @@ async function detachToFloatingWindow(): Promise<void> {
 
     if (!controller) buildController();
     controller?.setTargets(floatingHud.panelCanvases());
-    controller?.setOptionsFor(optionsForMode);
+    refreshHud();
     controller?.resize();
+    requestRedraw();
 
-    stampTitle('floating');
+    presentationStatus = 'floating';
   } catch (e) {
+    if (e instanceof DOMException && e.name === 'NotAllowedError') {
+      // Browser requires an in-page gesture for Document PiP; keep in-page HUD cleanly.
+      presentationStatus = 'in-page';
+      guardian?.reattach();
+      return;
+    }
     const msg = e instanceof Error ? e.message : String(e);
     activeHud()?.setNotice(`Floating window failed: ${msg}`);
     guardian?.reattach();
   }
 }
 
-window.addEventListener('keydown', (e) => {
+// Retire any stale content-script instance left running in this tab after an
+// extension reload in chrome://extensions before registering our own listeners!
+const SUPERSEDE_EVENT = 'video-scopes:supersede';
+try {
+  window.dispatchEvent(new CustomEvent(SUPERSEDE_EVENT));
+} catch {
+  // Ignore
+}
+
+let superseded = false;
+const onKeyDown = (e: KeyboardEvent): void => {
+  if (superseded) return;
   if (e.altKey && e.code === 'KeyS') {
     e.preventDefault();
-    // Same path as the toolbar icon, so the shortcut and the icon always agree.
     if (enabled) {
       void disable();
     } else {
       ensureVisible();
     }
   }
-});
+};
+window.addEventListener('keydown', onKeyDown);
 
-// Nothing starts automatically.
-//
-// The panel is opt-in: it costs GPU time, allocates textures, and overlays the
-// page, so it must only run when the user asks for it. `chrome.storage.session`
-// remembers that the user switched it on for THIS browser session, so opening a
-// new video tab keeps working without a click, while a cold start is always
-// silent.
+window.addEventListener(
+  SUPERSEDE_EVENT,
+  () => {
+    superseded = true;
+    window.removeEventListener('keydown', onKeyDown);
+    void disable();
+  },
+  { once: true },
+);
+
 void (async () => {
   let shouldStart = false;
   try {
     const got = await chrome.storage.session.get('scopesOn');
     shouldStart = got.scopesOn === true;
   } catch {
-    // No session storage: stay off. Starting unasked is the worse failure.
     shouldStart = false;
   }
 
   if (!shouldStart) {
-    stampTitle('idle');
+    presentationStatus = 'idle';
     return;
   }
 
-  // Read settings defensively; a storage failure must not block the panel.
   try {
     const saved = await loadSettings();
     state = { ...saved, visible: true };
@@ -678,19 +956,8 @@ void (async () => {
     await enable();
   } catch (e) {
     const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-    stampTitle('enable-failed');
-    // enable() mounts the panel first, so this only fires for failures in the
-    // mount itself — report visibly in that case.
+    presentationStatus = 'enable-failed';
     showDiagnostic('error', msg);
     console.error('[video-scopes] enable failed:', msg);
   }
 })();
-
-// Keep the panel reachable when the page tears down the DOM it lived in.
-document.addEventListener('fullscreenchange', () => {
-  if (!activeHud()?.mounted) return;
-  const host = document.getElementById(HOST_ID);
-  if (!host) return;
-  const fs = document.fullscreenElement;
-  if (fs && host.parentElement !== fs) fs.appendChild(host);
-});

@@ -151,6 +151,66 @@ export function splitNv12(
   return { y: buffer.subarray(0, layout.ySize), uv: buffer.subarray(layout.uvOffset), layout };
 }
 
+/**
+ * P010 (10-bit 4:2:0 HDR semi-planar): same plane topology as NV12, with 2 bytes
+ * per sample (16-bit little-endian, value in the high 10 bits, i.e. 0..65472
+ * representing 0..1023 << 6). Converting to 8-bit/16-bit normalized float on CPU
+ * or packing high bytes gives clean 10-bit HDR raw inspection.
+ */
+export function p010Layout(width: number, height: number): Nv12Layout {
+  if (width % 2 !== 0 || height % 2 !== 0) {
+    throw new Error('P010 requires even dimensions');
+  }
+  const yStride = width * 2;
+  const ySize = yStride * height;
+  return {
+    ySize,
+    uvOffset: ySize,
+    yStride,
+    uvStride: yStride,
+    uvHeight: height / 2,
+  };
+}
+
+/**
+ * Convert a 16-bit P010 buffer (top 10 bits active) into half-float / normalized
+ * 8-bit or Float32 planes. Packing into RGBA16F / Float32 or unorm: since WebGPU
+ * core universally supports `rgba16float` and `r8unorm` (whereas `r16unorm` requires
+ * an optional feature), we convert P010 16-bit words (`word / 65472`) into `rgba16float`
+ * or `r32float`? Wait: `rgba16float` supports bilinear filtering natively in WebGPU core!
+ * Even simpler: packing `(Y, U, V, 1.0)` or converting top-8/dithered or `Float16Array`!
+ * Here we expose `p010ToFloatPlanes` returning `Uint16Array` views of the raw 16-bit words
+ * so callers can upload or convert with zero guesswork.
+ */
+export function splitP010(
+  buffer: Uint8Array,
+  width: number,
+  height: number,
+): { y16: Uint16Array; uv16: Uint16Array; layout: Nv12Layout } {
+  const layout = p010Layout(width, height);
+  const y16 = new Uint16Array(buffer.buffer, buffer.byteOffset, width * height);
+  const uv16 = new Uint16Array(
+    buffer.buffer,
+    buffer.byteOffset + layout.uvOffset,
+    width * layout.uvHeight,
+  );
+  return { y16, uv16, layout };
+}
+
+/** Encode IEEE 754 binary16 (half-float) from [0, 1] float for `rgba16float` upload. */
+export function floatToHalfBits(val: number): number {
+  if (val <= 0) return 0;
+  if (val >= 65504) return 0x7bff;
+  const f32 = new Float32Array(1);
+  const u32 = new Uint32Array(f32.buffer);
+  f32[0] = val;
+  const x = u32[0]!;
+  const exp = ((x >> 23) & 0xff) - 127 + 15;
+  if (exp <= 0) return 0;
+  if (exp >= 31) return 0x7bff;
+  return (exp << 10) | ((x >> 13) & 0x3ff);
+}
+
 /** Split an I420 buffer into Y, U and V planes. */
 export function splitI420(
   buffer: Uint8Array,

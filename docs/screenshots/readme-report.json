@@ -1,0 +1,163 @@
+{
+  "shots": [
+    {
+      "path": "docs/screenshots/readme-hero.png",
+      "measured": [
+        {
+          "mode": "waveform-rgb",
+          "lit": 93682,
+          "colouredPct": 98,
+          "spanX": 84,
+          "spanY": 70
+        },
+        {
+          "mode": "waveform-parade",
+          "lit": 56172,
+          "colouredPct": 100,
+          "spanX": 84,
+          "spanY": 70
+        },
+        {
+          "mode": "vectorscope",
+          "lit": 2156,
+          "colouredPct": 76,
+          "spanX": 17,
+          "spanY": 30
+        },
+        {
+          "mode": "cie",
+          "lit": 1159,
+          "colouredPct": 84,
+          "spanX": 18,
+          "spanY": 14
+        }
+      ]
+    },
+    {
+      "path": "docs/screenshots/readme-waveform.png",
+      "measured": [
+        {
+          "mode": "waveform-luma",
+          "lit": 189221,
+          "colouredPct": 100,
+          "spanX": 93,
+          "spanY": 71
+        }
+      ]
+    },
+    {
+      "path": "docs/screenshots/readme-parade.png",
+      "measured": [
+        {
+          "mode": "waveform-parade",
+          "lit": 7043,
+          "colouredPct": 100,
+          "spanX": 93,
+          "spanY": 78
+        }
+      ]
+    },
+    {
+      "path": "docs/screenshots/readme-vectorscope.png",
+      "measured": [
+        {
+          "mode": "vectorscope",
+          "lit": 9516,
+          "colouredPct": 84,
+          "spanX": 43,
+          "spanY": 80
+        }
+      ]
+    },
+    {
+      "path": "docs/screenshots/readme-cie.png",
+      "measured": [
+        {
+          "mode": "cie",
+          "lit": 16983,
+          "colouredPct": 96,
+          "spanX": 28,
+          "spanY": 56
+        }
+      ]
+    },
+    {
+      "path": "docs/screenshots/readme-false-color.png",
+      "measured": [
+        {
+          "mode": "waveform-rgb",
+          "lit": 83658,
+          "colouredPct": 98,
+          "spanX": 80,
+          "spanY": 72
+        },
+        {
+          "mode": "vectorscope",
+          "lit": 2037,
+          "colouredPct": 78,
+          "spanX": 19,
+          "spanY": 22
+        }
+      ]
+    }
+  ],
+  "report": [
+    {
+      "name": "hero",
+      "host": {
+        "x": 840,
+        "y": 20,
+        "w": 700,
+        "h": 600
+      },
+      "perf": "30fps 5.1ms 0copy 474p",
+      "status": "axis:limited",
+      "cs": "BT709 · src:limited · bt709 · NV12",
+      "cells": [
+        "waveform-rgb",
+        "waveform-parade",
+        "vectorscope",
+        "cie"
+      ]
+    },
+    {
+      "name": "waveform",
+      "clip": {
+        "x": 420,
+        "y": 20,
+        "width": 760,
+        "height": 520
+      }
+    },
+    {
+      "name": "parade",
+      "clip": {
+        "x": 420,
+        "y": 20,
+        "width": 760,
+        "height": 520
+      }
+    },
+    {
+      "name": "vectorscope",
+      "clip": {
+        "x": 420,
+        "y": 20,
+        "width": 760,
+        "height": 520
+      }
+    },
+    {
+      "name": "cie",
+      "clip": {
+        "x": 420,
+        "y": 20,
+        "width": 760,
+        "height": 520
+      }
+    },
+    {
+      "name": "false-color"
+    }
+  ]
+}

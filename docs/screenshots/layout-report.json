@@ -2,12 +2,12 @@
   "ui": {
     "dpr": 2,
     "panelH": 422,
-    "gridH": 295,
-    "optsH": 65,
+    "gridH": 310,
+    "optsH": 20,
     "navButtons": [
       "Wave",
-      "RGB",
       "Parade",
+      "Hist",
       "Vector",
       "CIE"
     ],
@@ -30,24 +30,24 @@
   "geo": {
     "dpr": 2,
     "cssW": 550,
-    "cssH": 287,
+    "cssH": 281,
     "devW": 1100,
-    "devH": 574,
-    "topInsetCss": 33.5,
+    "devH": 562,
+    "topInsetCss": 33,
     "leftInsetCss": 44,
-    "rightGapCss": 10.5,
+    "rightGapCss": 10,
     "peakIre": 100.1,
     "debug": {
       "canvasW": 1100,
-      "canvasH": 574,
+      "canvasH": 562,
       "cssW": 550,
-      "cssH": 287,
+      "cssH": 281,
       "dpr": 2,
       "grids": 1,
       "gridClass": "grid single",
       "gridRect": {
         "w": 558,
-        "h": 295
+        "h": 310
       },
       "hostRect": {
         "w": 560,
@@ -58,12 +58,12 @@
         "h": 422
       },
       "gridStyle": {
-        "cols": "550px",
-        "rows": "287.211px",
+        "cols": "552px",
+        "rows": "303.5px",
         "cls": "grid single"
       },
       "cells": [
-        "waveform-luma:550x287"
+        "waveform-luma:552x304"
       ]
     },
     "labelPixels": 2771,

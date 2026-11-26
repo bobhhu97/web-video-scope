@@ -98,3 +98,29 @@ export class RangeDetector {
     return null;
   }
 }
+
+/**
+ * Filter raw range diagnosis against the active sampling path and user range override:
+ * - In `'display'` signalMode, Chrome's media compositor already expands limited-range
+ *   (`16..235`) YUV streams to `[0.0 .. 1.0]` RGB before WebGPU reads them, so `[0..1]`
+ *   occupancy is 100% normal and `'full-treated-as-limited'` must never fire.
+ * - If the user has explicitly selected `'limited'` or `'full'` to resolve a mismatch,
+ *   suppress the corresponding mismatch warning.
+ */
+export function sanitizeRangeDiagnosis(
+  diagnosis: RangeDiagnosis,
+  signalMode: 'display' | 'raw',
+  rangeMode: RangeMode,
+): RangeDiagnosis {
+  let warning = diagnosis.warning;
+  if (signalMode === 'display' && warning === 'full-treated-as-limited') {
+    warning = null;
+  }
+  if (rangeMode === 'limited' && warning === 'limited-treated-as-full') {
+    warning = null;
+  }
+  if (rangeMode === 'full' && warning === 'full-treated-as-limited') {
+    warning = null;
+  }
+  return warning === diagnosis.warning ? diagnosis : { ...diagnosis, warning };
+}

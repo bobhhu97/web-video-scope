@@ -1,49 +1,173 @@
 import { LUMA, SKIN_TONE_ANGLE_DEG, chromaTargets } from '../core/color/matrices';
 import { CIE1931_LOCUS, SPECTRAL_WAVELENGTHS, gamutTriangle } from '../core/color/locus';
 import { smoothOpenSpline } from '../core/color/spline';
-import { linearToSrgb, xyToLinearSrgb } from '../core/color/transfer';
+import { SDR_DIFFUSE_WHITE_NITS, linearToSrgb, xyToLinearSrgb } from '../core/color/transfer';
 import type { PrimariesId } from '../core/color/primaries';
-import { axisToUnit, legalBands, tickValues, unitSuffix } from '../core/scale/units';
-import { CIE_BOUNDS, cieFrame, frameToScreen, screenToFrame, type CieFrame } from '../core/color/cie-frame';
+import {
+  formatTickLabel,
+  legalBands,
+  nitsToAxisForTransfer,
+  resolveEffectiveUnit,
+  tickValues,
+  unitSuffix,
+} from '../core/scale/units';
+import {
+  cieFrame,
+  cieViewportFrame,
+  frameToScreen,
+  screenToFrame,
+  type CieFrame,
+} from '../core/color/cie-frame';
+import {
+  insideVectorscopeDisc,
+  vectorscopeFrame,
+  vectorscopeToScreen,
+} from '../core/color/vectorscope-frame';
 import type { ScopeOptions } from '../gpu/scope-renderer';
 
-/**
- * Plot margins, in CSS pixels.
- *
- * These were 8/8/16/40, which left only ~161 px of plot height inside a 2x2
- * grid cell (~185 px tall). Ten IRE gridlines in 161 px reads as a solid block,
- * and the outermost labels were clipped by the cell edge. The bottom margin
- * also has to fit the parade's R/G/B captions.
- */
 export const WAVE_PAD = { top: 14, right: 10, bottom: 22, left: 44 } as const;
 
-/**
- * The graticule is drawn on a transparent overlay canvas stacked above the GPU
- * density canvas. It must never fill an opaque background — doing so would
- * cover the waveform completely. The panel background comes from CSS.
- */
 const GRID = '#1b232b';
 const GRID_MAJOR = '#33414d';
 const LEGAL = '#5d7f93';
 const BAND = 'rgba(255,255,255,0.035)';
 const TEXT = '#7d8b96';
+const HDR_REF_WHITE_COLOR = '#6ec8e8';
+const NIT_LOW_COLOR = '#38bdf8';
+const NIT_HIGH_COLOR = '#fb923c';
+const NIT_PEAK_BAND = 'rgba(251, 113, 133, 0.075)';
+const NIT_SHADOW_BAND = 'rgba(56, 189, 248, 0.045)';
 
-/**
- * Axis (0..1 in code space) to canvas y. `zoom` magnifies from the floor so
- * HDR headroom can be inspected without changing the data.
- */
-export function axisToCanvasY(axis: number, plotTop: number, plotHeight: number, zoom = 1): number {
-  const clamped = Math.min(1, Math.max(0, axis * zoom));
+export function axisToCanvasY(
+  axis: number,
+  plotTop: number,
+  plotHeight: number,
+  zoom = 1,
+  panY = 0,
+): number {
+  const clamped = Math.min(1, Math.max(0, (axis - panY) * zoom));
   return plotTop + plotHeight * (1 - clamped);
 }
 
-export function canvasYToAxis(y: number, plotTop: number, plotHeight: number, zoom = 1): number {
+export function canvasYToAxis(
+  y: number,
+  plotTop: number,
+  plotHeight: number,
+  zoom = 1,
+  panY = 0,
+): number {
   const rel = 1 - (y - plotTop) / plotHeight;
-  return Math.min(1, Math.max(0, rel)) / zoom;
+  return panY + Math.min(1, Math.max(0, rel)) / zoom;
+}
+
+export function axisToCanvasX(
+  axis: number,
+  plotLeft: number,
+  plotWidth: number,
+  zoom = 1,
+  panX = 0,
+): number {
+  const clamped = Math.min(1, Math.max(0, (axis - panX) * zoom));
+  return plotLeft + plotWidth * clamped;
+}
+
+function formatNitBadge(nits: number): string {
+  if (nits >= 1000) {
+    return `${+(nits / 1000).toFixed(nits % 1000 === 0 ? 0 : 1)}k`;
+  }
+  return `${Math.round(nits)}n`;
+}
+
+function drawHdrThresholdLinesY(
+  ctx: CanvasRenderingContext2D,
+  o: ScopeOptions,
+  plotLeft: number,
+  plotTop: number,
+  plotW: number,
+  plotH: number,
+  zoom: number,
+  panY: number,
+): void {
+  const effTransfer = o.effectiveTransfer ?? 'sdr';
+  const effUnit = resolveEffectiveUnit(o.units, effTransfer);
+  const isHdrScale = effTransfer !== 'sdr' || effUnit === 'nits' || effUnit === 'hlg';
+  const showZones = o.traceMode === 'hdr-zones' || isHdrScale;
+  if (!showZones) return;
+
+  const nitLow = Math.max(0.01, o.nitLow ?? 100);
+  const nitHigh = Math.max(nitLow + 1, o.nitHigh ?? 1000);
+  const axisLow = nitsToAxisForTransfer(nitLow, effTransfer, o.range);
+  const axisHigh = nitsToAxisForTransfer(nitHigh, effTransfer, o.range);
+
+  // Shade peak exceedance region (> nitHigh) and deep shadow region (< nitLow) when HDR zones active
+  if (o.traceMode === 'hdr-zones' || isHdrScale) {
+    const yHigh = axisToCanvasY(axisHigh, plotTop, plotH, zoom, panY);
+    if (yHigh > plotTop + 1) {
+      ctx.fillStyle = NIT_PEAK_BAND;
+      ctx.fillRect(plotLeft, plotTop, plotW, Math.min(plotH, yHigh - plotTop));
+    }
+    if (o.traceMode === 'hdr-zones') {
+      const yLow = axisToCanvasY(axisLow, plotTop, plotH, zoom, panY);
+      if (yLow < plotTop + plotH - 1) {
+        ctx.fillStyle = NIT_SHADOW_BAND;
+        ctx.fillRect(plotLeft, Math.max(plotTop, yLow), plotW, plotTop + plotH - Math.max(plotTop, yLow));
+      }
+    }
+  }
+
+  // ITU-R BT.2408 203 nits Reference White line (when not identical to nitLow/nitHigh)
+  if (isHdrScale && Math.abs(nitLow - SDR_DIFFUSE_WHITE_NITS) > 8 && Math.abs(nitHigh - SDR_DIFFUSE_WHITE_NITS) > 15) {
+    const axisRef = nitsToAxisForTransfer(SDR_DIFFUSE_WHITE_NITS, effTransfer, o.range);
+    const relRef = (axisRef - panY) * zoom;
+    if (relRef >= 0 && relRef <= 1) {
+      const yRef = axisToCanvasY(axisRef, plotTop, plotH, zoom, panY);
+      ctx.save();
+      ctx.strokeStyle = HDR_REF_WHITE_COLOR;
+      ctx.globalAlpha = 0.55;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      ctx.moveTo(plotLeft, yRef);
+      ctx.lineTo(plotLeft + plotW, yRef);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // User Low-Nit & High-Nit threshold lines + right-side callout tags
+  const thresholds: { axis: number; nits: number; color: string; tag: string }[] = [
+    { axis: axisLow, nits: nitLow, color: NIT_LOW_COLOR, tag: formatNitBadge(nitLow) },
+    { axis: axisHigh, nits: nitHigh, color: NIT_HIGH_COLOR, tag: `>${formatNitBadge(nitHigh)}` },
+  ];
+
+  ctx.save();
+  ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+  for (const t of thresholds) {
+    const rel = (t.axis - panY) * zoom;
+    if (rel < -0.005 || rel > 1.005) continue;
+    const y = axisToCanvasY(t.axis, plotTop, plotH, zoom, panY);
+    ctx.strokeStyle = t.color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 3]);
+    ctx.beginPath();
+    ctx.moveTo(plotLeft, y);
+    ctx.lineTo(plotLeft + plotW, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    const labelW = ctx.measureText(t.tag).width + 6;
+    const bx = plotLeft + plotW - labelW - 3;
+    const by = Math.min(plotTop + plotH - 11, Math.max(plotTop + 1, y - 5.5));
+    ctx.fillStyle = 'rgba(11, 15, 18, 0.82)';
+    ctx.fillRect(bx, by, labelW, 11);
+    ctx.fillStyle = t.color;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(t.tag, bx + 3, by + 5.5);
+  }
+  ctx.restore();
 }
 
 export function drawWaveformGraticule(ctx: CanvasRenderingContext2D, o: ScopeOptions): void {
-  // o.width / o.height are CSS pixels; the 2D context already carries a DPR transform.
   const w = o.width;
   const h = o.height;
   ctx.clearRect(0, 0, w, h);
@@ -54,76 +178,127 @@ export function drawWaveformGraticule(ctx: CanvasRenderingContext2D, o: ScopeOpt
   const plotW = w - WAVE_PAD.left - WAVE_PAD.right;
   if (plotW <= 0 || plotH <= 0) return;
 
-  const bands = legalBands(o.range);
-  if (bands.footroom[1] > bands.footroom[0]) {
-    const y0 = axisToCanvasY(bands.footroom[1], plotTop, plotH, o.zoom);
-    const y1 = axisToCanvasY(bands.footroom[0], plotTop, plotH, o.zoom);
-    ctx.fillStyle = BAND;
-    ctx.fillRect(plotLeft, y0, plotW, y1 - y0);
-  }
-  if (bands.headroom[1] > bands.headroom[0]) {
-    const y0 = axisToCanvasY(bands.headroom[1], plotTop, plotH, o.zoom);
-    const y1 = axisToCanvasY(bands.headroom[0], plotTop, plotH, o.zoom);
-    ctx.fillStyle = BAND;
-    ctx.fillRect(plotLeft, y0, plotW, y1 - y0);
+  const zoom = Math.max(1, o.zoom || 1);
+  const maxPan = Math.max(0, 1 - 1 / zoom);
+  const panY = Math.min(maxPan, Math.max(0, o.panY ?? 0));
+  const effTransfer = o.effectiveTransfer ?? 'sdr';
+  const effUnit = resolveEffectiveUnit(o.units, effTransfer);
+  const isHdrScale = effUnit === 'nits' || effUnit === 'hlg';
+
+  if (!isHdrScale) {
+    const bands = legalBands(o.range);
+    if (bands.footroom[1] > bands.footroom[0]) {
+      const y0 = axisToCanvasY(bands.footroom[1], plotTop, plotH, zoom, panY);
+      const y1 = axisToCanvasY(bands.footroom[0], plotTop, plotH, zoom, panY);
+      if (y1 > y0) {
+        ctx.fillStyle = BAND;
+        ctx.fillRect(plotLeft, y0, plotW, y1 - y0);
+      }
+    }
+    if (bands.headroom[1] > bands.headroom[0]) {
+      const y0 = axisToCanvasY(bands.headroom[1], plotTop, plotH, zoom, panY);
+      const y1 = axisToCanvasY(bands.headroom[0], plotTop, plotH, zoom, panY);
+      if (y1 > y0) {
+        ctx.fillStyle = BAND;
+        ctx.fillRect(plotLeft, y0, plotW, y1 - y0);
+      }
+    }
   }
 
   ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
 
-  // Every gridline is drawn; labels are decimated by a stride chosen from the
-  // available height, never dropped arbitrarily. A fixed minimum gap silently
-  // produced an unlabelled scale whenever the plot was short.
-  const ticks = tickValues(o.units, o.range);
+  const allTicks = tickValues(effUnit, o.range, zoom);
+  const visibleTicks = allTicks.filter((a) => {
+    const rel = (a - panY) * zoom;
+    return rel >= -1e-4 && rel <= 1 + 1e-4;
+  });
+
   const LABEL_LINE_H = 13;
   const maxLabels = Math.max(2, Math.floor(plotH / LABEL_LINE_H));
-  const stride = Math.max(1, Math.ceil(ticks.length / maxLabels));
+  const stride = Math.max(1, Math.ceil(visibleTicks.length / maxLabels));
 
-  for (let i = 0; i < ticks.length; i++) {
-    const a = ticks[i]!;
-    const y = axisToCanvasY(a, plotTop, plotH, o.zoom);
+  for (let i = 0; i < visibleTicks.length; i++) {
+    const a = visibleTicks[i]!;
+    const y = axisToCanvasY(a, plotTop, plotH, zoom, panY);
     ctx.strokeStyle = GRID;
     ctx.beginPath();
     ctx.moveTo(plotLeft, y);
     ctx.lineTo(plotLeft + plotW, y);
     ctx.stroke();
 
-    // Always label the first and last tick (0 and 100 IRE), then every stride.
-    const isEnd = i === 0 || i === ticks.length - 1;
+    const isEnd = i === 0 || i === visibleTicks.length - 1;
     if (!isEnd && i % stride !== 0) continue;
     ctx.fillStyle = isEnd ? LEGAL : TEXT;
-    ctx.fillText(String(Math.round(axisToUnit(a, o.units, o.range))), plotLeft - 5, y);
+    ctx.fillText(formatTickLabel(a, effUnit, o.range), plotLeft - 5, y);
   }
 
-  ctx.strokeStyle = LEGAL;
-  ctx.setLineDash([4, 3]);
-  for (const a of [bands.footroom[1], bands.headroom[0]]) {
-    if (a <= 0 || a >= 1) continue;
-    const y = axisToCanvasY(a, plotTop, plotH, o.zoom);
-    ctx.beginPath();
-    ctx.moveTo(plotLeft, y);
-    ctx.lineTo(plotLeft + plotW, y);
-    ctx.stroke();
+  if (!isHdrScale) {
+    const bands = legalBands(o.range);
+    ctx.strokeStyle = LEGAL;
+    ctx.setLineDash([4, 3]);
+    for (const a of [bands.footroom[1], bands.headroom[0]]) {
+      if (a <= 0 || a >= 1) continue;
+      const rel = (a - panY) * zoom;
+      if (rel < 0 || rel > 1) continue;
+      const y = axisToCanvasY(a, plotTop, plotH, zoom, panY);
+      ctx.beginPath();
+      ctx.moveTo(plotLeft, y);
+      ctx.lineTo(plotLeft + plotW, y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
   }
-  ctx.setLineDash([]);
 
-  // Parade: draw the slice dividers so the three panels read as separate scopes.
+  drawHdrThresholdLinesY(ctx, o, plotLeft, plotTop, plotW, plotH, zoom, panY);
+
+  // YUV Waveform zero-chroma 50% centerline reference
+  if (o.mode !== 'waveform-parade' && o.waveChannels === 'YUV') {
+    const rel50 = (0.5 - panY) * zoom;
+    if (rel50 >= 0 && rel50 <= 1) {
+      const y50 = axisToCanvasY(0.5, plotTop, plotH, zoom, panY);
+      ctx.strokeStyle = '#3b5163';
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      ctx.moveTo(plotLeft, y50);
+      ctx.lineTo(plotLeft + plotW, y50);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // Parade: slice dividers and labels for RGB (3), YRGB (4), or YUV (3).
   if (o.mode === 'waveform-parade') {
+    const pm = o.paradeMode ?? 'RGB';
+    const labels = pm === 'YRGB' ? ['Y', 'R', 'G', 'B'] : pm === 'YUV' ? ['Y', 'U (Cb)', 'V (Cr)'] : ['R', 'G', 'B'];
+    const n = labels.length;
     ctx.strokeStyle = GRID_MAJOR;
     ctx.setLineDash([2, 4]);
-    for (let i = 1; i < 3; i++) {
-      const x = plotLeft + (plotW * i) / 3;
+    for (let i = 1; i < n; i++) {
+      const x = plotLeft + (plotW * i) / n;
       ctx.beginPath();
       ctx.moveTo(x, plotTop);
       ctx.lineTo(x, plotTop + plotH);
       ctx.stroke();
     }
+    // Zero-chroma centerline across U & V slices in YUV Parade
+    if (pm === 'YUV') {
+      const rel50 = (0.5 - panY) * zoom;
+      if (rel50 >= 0 && rel50 <= 1) {
+        const y50 = axisToCanvasY(0.5, plotTop, plotH, zoom, panY);
+        ctx.strokeStyle = '#486378';
+        ctx.beginPath();
+        ctx.moveTo(plotLeft + plotW / 3, y50);
+        ctx.lineTo(plotLeft + plotW, y50);
+        ctx.stroke();
+      }
+    }
     ctx.setLineDash([]);
     ctx.textAlign = 'center';
     ctx.fillStyle = TEXT;
-    for (const [i, label] of ['R', 'G', 'B'].entries()) {
-      ctx.fillText(label, plotLeft + (plotW * (i + 0.5)) / 3, plotTop + plotH + 9);
+    for (const [i, label] of labels.entries()) {
+      ctx.fillText(label, plotLeft + (plotW * (i + 0.5)) / n, plotTop + plotH + 9);
     }
   }
 
@@ -131,7 +306,112 @@ export function drawWaveformGraticule(ctx: CanvasRenderingContext2D, o: ScopeOpt
   ctx.strokeRect(plotLeft + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
   ctx.textAlign = 'left';
   ctx.fillStyle = TEXT;
-  ctx.fillText(unitSuffix(o.units), 4, plotTop + 6);
+  ctx.fillText(unitSuffix(effUnit), 4, plotTop + 6);
+}
+
+export function drawHistogramGraticule(ctx: CanvasRenderingContext2D, o: ScopeOptions): void {
+  const w = o.width;
+  const h = o.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const plotTop = WAVE_PAD.top;
+  const plotH = h - WAVE_PAD.top - WAVE_PAD.bottom;
+  const plotLeft = WAVE_PAD.left;
+  const plotW = w - WAVE_PAD.left - WAVE_PAD.right;
+  if (plotW <= 0 || plotH <= 0) return;
+
+  const zoom = Math.max(1, o.zoom || 1);
+  const maxPan = Math.max(0, 1 - 1 / zoom);
+  const panX = Math.min(maxPan, Math.max(0, o.panX ?? 0));
+  const effTransfer = o.effectiveTransfer ?? 'sdr';
+  const effUnit = resolveEffectiveUnit(o.units, effTransfer);
+  const isHdrScale = effUnit === 'nits' || effUnit === 'hlg';
+
+  // Horizontal density guide lines (25%, 50%, 75%)
+  ctx.strokeStyle = GRID;
+  for (const frac of [0.25, 0.5, 0.75]) {
+    const y = plotTop + plotH * (1 - frac);
+    ctx.beginPath();
+    ctx.moveTo(plotLeft, y);
+    ctx.lineTo(plotLeft + plotW, y);
+    ctx.stroke();
+  }
+
+  ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillStyle = TEXT;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('Peak', plotLeft - 5, plotTop + 6);
+  ctx.fillText('50%', plotLeft - 5, plotTop + plotH * 0.5);
+  ctx.fillText('0', plotLeft - 5, plotTop + plotH - 2);
+
+  // Vertical signal ticks along X
+  const allTicks = tickValues(effUnit, o.range, zoom);
+  const visibleTicks = allTicks.filter((a) => {
+    const rel = (a - panX) * zoom;
+    return rel >= -1e-4 && rel <= 1 + 1e-4;
+  });
+  const maxLabels = Math.max(2, Math.floor(plotW / 38));
+  const stride = Math.max(1, Math.ceil(visibleTicks.length / maxLabels));
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let i = 0; i < visibleTicks.length; i++) {
+    const a = visibleTicks[i]!;
+    const x = axisToCanvasX(a, plotLeft, plotW, zoom, panX);
+    ctx.strokeStyle = GRID;
+    ctx.beginPath();
+    ctx.moveTo(x, plotTop);
+    ctx.lineTo(x, plotTop + plotH);
+    ctx.stroke();
+
+    const isEnd = i === 0 || i === visibleTicks.length - 1;
+    if (!isEnd && i % stride !== 0) continue;
+    ctx.fillStyle = isEnd ? LEGAL : TEXT;
+    ctx.fillText(formatTickLabel(a, effUnit, o.range), x, plotTop + plotH + 4);
+  }
+
+  // Dual-Nit threshold vertical lines + peak zone band on Histogram
+  if (o.traceMode === 'hdr-zones' || isHdrScale) {
+    const nitLow = Math.max(0.01, o.nitLow ?? 100);
+    const nitHigh = Math.max(nitLow + 1, o.nitHigh ?? 1000);
+    const axisLow = nitsToAxisForTransfer(nitLow, effTransfer, o.range);
+    const axisHigh = nitsToAxisForTransfer(nitHigh, effTransfer, o.range);
+
+    const xHigh = axisToCanvasX(axisHigh, plotLeft, plotW, zoom, panX);
+    if (xHigh < plotLeft + plotW - 1) {
+      ctx.fillStyle = NIT_PEAK_BAND;
+      ctx.fillRect(Math.max(plotLeft, xHigh), plotTop, plotLeft + plotW - Math.max(plotLeft, xHigh), plotH);
+    }
+
+    for (const t of [
+      { axis: axisLow, color: NIT_LOW_COLOR, tag: formatNitBadge(nitLow) },
+      { axis: axisHigh, color: NIT_HIGH_COLOR, tag: `>${formatNitBadge(nitHigh)}` },
+    ]) {
+      const rel = (t.axis - panX) * zoom;
+      if (rel < 0 || rel > 1) continue;
+      const x = axisToCanvasX(t.axis, plotLeft, plotW, zoom, panX);
+      ctx.save();
+      ctx.strokeStyle = t.color;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x, plotTop);
+      ctx.lineTo(x, plotTop + plotH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = t.color;
+      ctx.textAlign = x > plotLeft + plotW - 36 ? 'right' : 'left';
+      ctx.fillText(t.tag, x + (x > plotLeft + plotW - 36 ? -3 : 3), plotTop + 3);
+      ctx.restore();
+    }
+  }
+
+  ctx.strokeStyle = GRID_MAJOR;
+  ctx.strokeRect(plotLeft + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = TEXT;
+  ctx.fillText(unitSuffix(effUnit), 4, plotTop + plotH + 9);
 }
 
 export function chromaToScreen(
@@ -156,65 +436,127 @@ export function screenToChroma(
   return [(x - ox) / (zoom * size), (oy - y) / (zoom * size)];
 }
 
+const TARGET_ACCENT: Record<string, string> = {
+  red: '#e69595',
+  yellow: '#dfd88e',
+  green: '#8dd8a3',
+  cyan: '#8ad4df',
+  blue: '#93b2e8',
+  magenta: '#dc9ae0',
+};
+
+function drawTargetBrackets(
+  ctx: CanvasRenderingContext2D,
+  px: number,
+  py: number,
+  size: number,
+): void {
+  const half = size / 2;
+  const arm = Math.max(2, size * 0.32);
+  ctx.beginPath();
+  ctx.moveTo(px - half, py - half + arm);
+  ctx.lineTo(px - half, py - half);
+  ctx.lineTo(px - half + arm, py - half);
+
+  ctx.moveTo(px + half - arm, py - half);
+  ctx.lineTo(px + half, py - half);
+  ctx.lineTo(px + half, py - half + arm);
+
+  ctx.moveTo(px + half, py + half - arm);
+  ctx.lineTo(px + half, py + half);
+  ctx.lineTo(px + half - arm, py + half);
+
+  ctx.moveTo(px - half + arm, py + half);
+  ctx.lineTo(px - half, py + half);
+  ctx.lineTo(px - half, py + half - arm);
+  ctx.stroke();
+}
+
 export function drawVectorscopeGraticule(ctx: CanvasRenderingContext2D, o: ScopeOptions): void {
   const w = o.width;
   const h = o.height;
-  const size = Math.min(w, h);
-  const cx = w / 2;
-  const cy = h / 2;
-  const radius = (size / 2) * o.zoom;
+  const frame = vectorscopeFrame(w, h, o.zoom, o.panX ?? 0, o.panY ?? 0);
+  const { cx, cy, discCx, discCy, radius } = frame;
 
   ctx.clearRect(0, 0, w, h);
 
+  // Stationary outer bezel circle
   ctx.strokeStyle = GRID_MAJOR;
   ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(discCx, discCy, radius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Clip inner panned/zoomed rings, crosshairs, targets, and skin line to the disc
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(discCx, discCy, radius, 0, Math.PI * 2);
+  ctx.clip();
+
+  ctx.strokeStyle = GRID_MAJOR;
+  const ringR = radius * frame.zoom;
   for (const frac of [0.25, 0.5, 0.75, 1]) {
     ctx.beginPath();
-    ctx.arc(cx, cy, radius * frac, 0, Math.PI * 2);
+    ctx.arc(cx, cy, ringR * frac, 0, Math.PI * 2);
     ctx.stroke();
   }
   ctx.beginPath();
-  ctx.moveTo(cx, cy - radius);
-  ctx.lineTo(cx, cy + radius);
-  ctx.moveTo(cx - radius, cy);
-  ctx.lineTo(cx + radius, cy);
+  ctx.moveTo(cx, cy - ringR);
+  ctx.lineTo(cx, cy + ringR);
+  ctx.moveTo(cx - ringR, cy);
+  ctx.lineTo(cx + ringR, cy);
   ctx.stroke();
 
   const c = LUMA[o.matrix];
+  const primaryLevel: 0.75 | 1 = o.barTargets === 1 ? 1 : 0.75;
+
   ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
-  ctx.textAlign = 'left';
+  ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  for (const level of [1, 0.75]) {
-    const targets = chromaTargets(c, level);
-    ctx.strokeStyle = level === 0.75 ? '#a8b3bd' : '#5a6470';
-    for (const t of targets) {
-      const [px, py] = chromaToScreen(t.cb, t.cr, size, o.zoom, cx, cy);
-      if (Math.hypot(px - cx, py - cy) > radius + 2) continue;
-      const s = Math.max(4, Math.min(16, t.radius * o.zoom * size * 0.14));
-      ctx.strokeRect(px - s / 2, py - s / 2, s, s);
-      if (level === 0.75) {
-        ctx.fillStyle = '#a8b3bd';
-        ctx.fillText(t.name[0]!.toUpperCase(), px + s / 2 + 2, py);
-      }
+  for (const t of chromaTargets(c, primaryLevel)) {
+    const [px, py] = vectorscopeToScreen(frame, t.cb, t.cr);
+    if (!insideVectorscopeDisc(frame, px, py, 12)) continue;
+    const s = Math.max(7, Math.min(15, radius * 0.11));
+    const accent = TARGET_ACCENT[t.name] ?? '#b8c7d4';
+    ctx.strokeStyle = accent;
+    drawTargetBrackets(ctx, px, py, s);
+
+    const dx = px - cx;
+    const dy = py - cy;
+    const len = Math.max(1e-3, Math.hypot(dx, dy));
+    const tx = -dy / len;
+    const ty = dx / len;
+    const lx = px + tx * (s / 2 + 6);
+    const ly = py + ty * (s / 2 + 6);
+    if (insideVectorscopeDisc(frame, lx, ly, 2)) {
+      ctx.fillStyle = accent;
+      ctx.fillText(t.name[0]!.toUpperCase(), lx, ly);
     }
   }
 
-  const ang = (SKIN_TONE_ANGLE_DEG * Math.PI) / 180;
-  ctx.strokeStyle = '#d8a06a';
-  ctx.setLineDash([3, 3]);
-  ctx.beginPath();
-  ctx.moveTo(cx, cy);
-  ctx.lineTo(cx + Math.cos(ang) * radius * 0.95, cy - Math.sin(ang) * radius * 0.95);
-  ctx.stroke();
-  ctx.setLineDash([]);
+  if (o.showSkinLine !== false) {
+    const ang = (SKIN_TONE_ANGLE_DEG * Math.PI) / 180;
+    ctx.strokeStyle = '#d8a06a';
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(ang) * ringR * 0.98, cy - Math.sin(ang) * ringR * 0.98);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.restore();
 
   ctx.fillStyle = TEXT;
+  ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
   ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  const toneTag = o.toneFilter && o.toneFilter !== 'all' ? ` · ${o.toneFilter}` : '';
   ctx.fillText(
-    `${o.matrix.toUpperCase()} · ${o.zoom}x${o.range.limited ? ' · limited' : ' · full'}`,
+    `${o.matrix.toUpperCase()} · ${Math.round(primaryLevel * 100)}% · ${+(o.zoom || 1).toFixed(1)}x${toneTag}`,
     8,
-    14,
+    12,
   );
 }
 
@@ -235,8 +577,10 @@ export function xyToScreen(
   h: number,
   coord: 'xy' | 'uv',
   zoom = 1,
+  panX?: number | null,
+  panY?: number | null,
 ): [number, number] {
-  return frameToScreen(cieFrame(w, h, coord, zoom), x, y);
+  return frameToScreen(cieFrame(w, h, coord, zoom, panX, panY), x, y);
 }
 
 export function screenToXy(
@@ -246,42 +590,26 @@ export function screenToXy(
   h: number,
   coord: 'xy' | 'uv',
   zoom = 1,
+  panX?: number | null,
+  panY?: number | null,
 ): [number, number] {
-  return screenToFrame(cieFrame(w, h, coord, zoom), px, py);
+  return screenToFrame(cieFrame(w, h, coord, zoom, panX, panY), px, py);
 }
 
-function chartToScreen(
+function chartToScreenWithFrame(
+  frame: CieFrame,
   x: number,
   y: number,
-  w: number,
-  h: number,
   coord: 'xy' | 'uv',
-  zoom = 1,
 ): [number, number] {
-  return coord === 'xy'
-    ? xyToScreen(x, y, w, h, 'xy', zoom)
-    : xyToScreen(...xyToUv(x, y), w, h, 'uv', zoom);
+  if (coord === 'xy') return frameToScreen(frame, x, y);
+  const [u, v] = xyToUv(x, y);
+  return frameToScreen(frame, u, v);
 }
 
-/** Far-red tail, in nm: where the outline starts bending toward violet. */
 const RED_TAIL_START = 600;
-/** How far toward the violet end the far-red tail is pulled, 0..1. */
 const RED_TAIL_MIX = 0.75;
 
-/**
- * Lift negative channels to zero with the minimum amount of neutral.
- *
- * Spectral colours are outside sRGB, and the naive fixes both fail: a per-channel
- * clamp destroys the hue ramp, and blending toward the white point pushes the
- * whole blue-green arc to white (all 65 samples collapsed to one colour).
- *
- * Mixing `t` of this colour's own brightest value into every channel solves
- * `min*(1-t) + max*t = 0` for the smallest `t` that makes the colour
- * representable. Chroma direction is preserved, only the unavoidable amount of
- * desaturation is applied, and the ramp survives: 21 distinct colours became 54,
- * and the longest single-colour run dropped from 40 samples to 6. That run was
- * the green arc, not the red one — the flat green was the larger visual defect.
- */
 function gamutSafe(lin: [number, number, number]): [number, number, number] {
   const min = Math.min(lin[0], lin[1], lin[2]);
   if (min >= 0) return lin;
@@ -290,19 +618,6 @@ function gamutSafe(lin: [number, number, number]): [number, number, number] {
   return [lin[0] * (1 - t) + max * t, lin[1] * (1 - t) + max * t, lin[2] * (1 - t) + max * t];
 }
 
-/**
- * Colour for one point on the locus.
- *
- * Two defects had to be fixed here, and the fixes are easy to confuse:
- *
- * 1. Out-of-gamut handling, per `gamutSafe` above.
- * 2. Beyond about 610 nm sRGB has no room left, so even after `gamutSafe` red
- *    sits at 255,0,0 and only creeps toward magenta at the very end. The tail is
- *    blended toward the violet end of the same locus, which keeps the ramp inside
- *    a hue range the display can show and lands 700 nm on roughly the colour of
- *    380 nm, so the outline meets the line of purples cleanly instead of ending
- *    in a flat red quarter.
- */
 function locusHue(x: number, y: number, wavelength: number): string {
   const normalise = ([r, g, b]: [number, number, number]): [number, number, number] => {
     const peak = Math.max(r, g, b, 1e-6);
@@ -330,14 +645,6 @@ function locusHue(x: number, y: number, wavelength: number): string {
   return `rgb(${enc(rgb[0])},${enc(rgb[1])},${enc(rgb[2])})`;
 }
 
-/**
- * Subdivisions per locus segment so no drawn segment exceeds ~3 px.
- *
- * Chosen by measurement: at 550x287 a 5 nm table with 6 subdivisions still turns
- * 6.5 degrees at the worst vertex, which is visible. 10 subdivisions brings that
- * to 4.2 degrees and 3 px segments, where the polyline is no longer readable as
- * straight edges.
- */
 function locusSubdivisions(screen: readonly (readonly [number, number])[]): number {
   let longest = 0;
   for (let i = 1; i < screen.length; i++) {
@@ -357,44 +664,27 @@ export function drawCieGraticule(
   const h = o.height;
   ctx.clearRect(0, 0, w, h);
 
-  // Draw the locus through a spline rather than as chords. The table is 5 nm, so
-  // the vertices are already close, but the green to blue corner turns hard
-  // enough that even those chords read as a corner. Subdivision is chosen from
-  // the longest on-screen segment so the curve is equally smooth in a 275 px
-  // grid cell and a 1100 px single view; a fixed count was either jagged or
-  // wasteful depending on panel size.
-  // One frame for every element in this graticule: the locus, the gamut
-  // triangles, the white point and the ticks must all agree, or the diagram is
-  // internally inconsistent even when each piece looks right on its own.
-  const frame = cieFrame(w, h, o.coord, o.zoom);
-  const screen = CIE1931_LOCUS.map((p) => chartToScreen(p[0], p[1], w, h, o.coord, o.zoom));
+  const frame = cieViewportFrame(w, h, o.coord, o.zoom, o.panX, o.panY, 1);
+
+  // Draw gridlines & numeric ticks first so the horseshoe & gamut triangles stay crisp above the grid
+  drawCieAxes(ctx, frame, w, h, o.coord);
+
+  const screen = CIE1931_LOCUS.map((p) => chartToScreenWithFrame(frame, p[0], p[1], o.coord));
   const pts = smoothOpenSpline(screen, locusSubdivisions(screen));
+
+  ctx.save();
+  // Clip locus & triangles away from the top header strip (0..20px) when zoomed in
+  ctx.beginPath();
+  ctx.rect(0, Math.min(20, frame.top - 2), w, Math.max(1, h - Math.min(20, frame.top - 2)));
+  ctx.clip();
 
   ctx.beginPath();
   pts.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
   ctx.closePath();
-  // No fill. This canvas is stacked above the data canvas, so any opaque fill
-  // here hides the point cloud — which is exactly how the CIE panel came to look
-  // empty while its data layer was drawing correctly. Same rule the waveform
-  // graticule follows.
   ctx.strokeStyle = '#4a5a66';
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // Colour the outline by wavelength, continuously.
-  //
-  // Two earlier attempts both read as "straight edges" even though the geometry
-  // was right (measured deviation from the true 1 nm locus: 0.15 css px):
-  //   - one 3 px stroke per 3 px segment, round caps: the caps bulge a semicircle
-  //     past every joint, scalloping the outer edge with a 3 px period
-  //   - one flat colour per 5 nm table entry: 65 hard hue steps along the arc,
-  //     which the eye reads as flat facets
-  //
-  // So: keep short segments, but use butt caps and extend each one by half the
-  // line width along its own tangent. Consecutive quads then overlap exactly
-  // instead of leaving notches, and the hue can vary per segment.
-  // 2 CSS px: the outline is a reference curve, and a thicker stroke turns each
-  // 5 nm colour step into a visible block, which is what "hard edges" looked like.
   const lw = 2;
   const half = lw / 2;
   ctx.lineWidth = lw;
@@ -408,7 +698,6 @@ export function drawCieGraticule(
     if (len < 1e-6) continue;
     const ux = (x1 - x0) / len;
     const uy = (y1 - y0) / len;
-    // Interpolate the wavelength, then the hue, so the ramp is smooth.
     const t = i / perSegment;
     const k = Math.min(CIE1931_LOCUS.length - 1, Math.floor(t));
     const k2 = Math.min(CIE1931_LOCUS.length - 1, k + 1);
@@ -423,34 +712,33 @@ export function drawCieGraticule(
     ctx.stroke();
   }
 
-  ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
   const GAMUT_COLOR: Record<PrimariesId, string> = {
     rec709: '#7fa8d8',
     p3: '#d8c07f',
     rec2020: '#d87f7f',
   };
+  const GAMUT_LEGEND_COLOR: Record<PrimariesId, string> = {
+    rec709: '#a4cdfa',
+    p3: '#f0d890',
+    rec2020: '#f29c9c',
+  };
   const GAMUT_LABEL: Record<PrimariesId, string> = {
-    rec709: 'Rec.709',
+    rec709: '709',
     p3: 'P3',
-    rec2020: 'Rec.2020',
+    rec2020: '2020',
   };
   for (const id of o.gamuts) {
-    const tri = gamutTriangle(id).map((p) => chartToScreen(p[0], p[1], w, h, o.coord, o.zoom));
+    const tri = gamutTriangle(id).map((p) => chartToScreenWithFrame(frame, p[0], p[1], o.coord));
     ctx.beginPath();
     tri.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
     ctx.closePath();
     ctx.strokeStyle = GAMUT_COLOR[id];
     ctx.lineWidth = 1;
     ctx.stroke();
-    const [lx, ly] = tri[1]!;
-    ctx.fillStyle = GAMUT_COLOR[id];
-    ctx.fillText(GAMUT_LABEL[id], lx + 4, ly);
   }
 
   const white = o.coord === 'xy' ? ([0.3127, 0.329] as const) : xyToUv(0.3127, 0.329);
-  const [wx, wy] = xyToScreen(white[0], white[1], w, h, o.coord, o.zoom);
+  const [wx, wy] = frameToScreen(frame, white[0], white[1]);
   ctx.strokeStyle = '#e8e8e8';
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -459,29 +747,40 @@ export function drawCieGraticule(
   ctx.moveTo(wx, wy - 5);
   ctx.lineTo(wx, wy + 5);
   ctx.stroke();
-  drawCieAxes(ctx, frame, h);
+  ctx.restore();
 
+  // Top header strip (y = 11, strictly above frame.top >= 28):
+  // Left: illuminant + chart mode + primaries + zoom; Right: color-coded gamut legend!
+  ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
   ctx.fillStyle = TEXT;
-  ctx.fillText(
+  const headerLeft =
     `D65 · ${o.coord === 'xy' ? 'CIE 1931 xy' : "CIE 1976 u'v'"} · ${o.primaries}` +
-      (o.zoom > 1 ? ` · ${o.zoom}x` : ''),
-    8,
-    14,
-  );
+    (o.zoom > 1.01 ? ` · ${+o.zoom.toFixed(1)}x` : '');
+  ctx.fillText(headerLeft, 8, 11);
+
+  const headerLeftEnd = 8 + ctx.measureText(headerLeft).width + 12;
+  let legendX = w - 8;
+  ctx.textAlign = 'right';
+  for (let i = o.gamuts.length - 1; i >= 0; i--) {
+    const id = o.gamuts[i]!;
+    const item = `─ ${GAMUT_LABEL[id]}`;
+    const iw = ctx.measureText(item).width;
+    if (legendX - iw < headerLeftEnd) break;
+    ctx.fillStyle = GAMUT_LEGEND_COLOR[id];
+    ctx.fillText(item, legendX, 11);
+    legendX -= iw + 8;
+  }
 }
 
-/**
- * Chromaticity axes for the CIE plot.
- *
- * A chromaticity diagram without coordinates is unreadable for measurement: the
- * user can see where a point sits relative to the gamut triangles but cannot say
- * what its chromaticity is. Ticks follow the frame's equal axis scale, so they
- * stay correct at any panel size and while zoomed.
- *
- * The step is chosen from the visible span so there are always a handful of
- * labelled ticks, never a dense comb.
- */
-function drawCieAxes(ctx: CanvasRenderingContext2D, frame: CieFrame, h: number): void {
+function drawCieAxes(
+  ctx: CanvasRenderingContext2D,
+  frame: CieFrame,
+  w: number,
+  h: number,
+  coord: 'xy' | 'uv' = 'xy',
+): void {
   const spanX = frame.x1 - frame.x0;
   const spanY = frame.y1 - frame.y0;
   const stepFor = (span: number): number => {
@@ -495,12 +794,12 @@ function drawCieAxes(ctx: CanvasRenderingContext2D, frame: CieFrame, h: number):
   const decimals = Math.max(1, Math.ceil(-Math.log10(Math.min(stepX, stepY))));
 
   ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
-  ctx.textBaseline = 'middle';
   ctx.strokeStyle = GRID;
   ctx.lineWidth = 1;
 
-  // Vertical gridlines and their x labels, along the bottom of the plot box.
   ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const xLabelY = Math.min(h - 11, frame.top + frame.height + 3);
   const firstX = Math.ceil(frame.x0 / stepX) * stepX;
   for (let v = firstX; v <= frame.x1 + 1e-9; v += stepX) {
     const [px] = frameToScreen(frame, v, frame.y0);
@@ -509,13 +808,17 @@ function drawCieAxes(ctx: CanvasRenderingContext2D, frame: CieFrame, h: number):
     ctx.moveTo(px, frame.top);
     ctx.lineTo(px, frame.top + frame.height);
     ctx.stroke();
+    if (px < 12 || px > w - 16) continue;
     ctx.fillStyle = TEXT;
-    ctx.fillText(v.toFixed(decimals), px, h - 6);
+    ctx.fillText(v.toFixed(decimals), px, xLabelY);
   }
 
-  // Horizontal gridlines and their y labels, down the left edge of the plot box.
-  ctx.textAlign = 'right';
+  const labelOutside = frame.left >= 22;
+  ctx.textAlign = labelOutside ? 'right' : 'left';
+  ctx.textBaseline = 'middle';
+  const yLabelX = labelOutside ? frame.left - 5 : frame.left + 4;
   const firstY = Math.ceil(frame.y0 / stepY) * stepY;
+  const drawnTickYs: number[] = [];
   for (let v = firstY; v <= frame.y1 + 1e-9; v += stepY) {
     const [, py] = frameToScreen(frame, frame.x0, v);
     if (py < frame.top - 0.5 || py > frame.top + frame.height + 0.5) continue;
@@ -523,34 +826,62 @@ function drawCieAxes(ctx: CanvasRenderingContext2D, frame: CieFrame, h: number):
     ctx.moveTo(frame.left, py);
     ctx.lineTo(frame.left + frame.width, py);
     ctx.stroke();
+    const clampedY = Math.min(h - 14, Math.max(20, py));
+    if (Math.abs(clampedY - py) > 4) continue;
+    drawnTickYs.push(clampedY);
     ctx.fillStyle = TEXT;
-    ctx.fillText(v.toFixed(decimals), frame.left - 4, py);
+    ctx.fillText(v.toFixed(decimals), yLabelX, clampedY);
   }
 
-  // Axis names, in the two free corners.
-  ctx.textAlign = 'left';
+  const hAxisName = coord === 'uv' ? "u'" : 'x';
+  const vAxisName = coord === 'uv' ? "v'" : 'y';
+
   ctx.fillStyle = TEXT;
-  ctx.fillText('x', frame.left + frame.width + 4, h - 6);
-  ctx.fillText('y', 4, frame.top - 2);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  if (frame.left + frame.width + 6 <= w - 12) {
+    ctx.fillText(hAxisName, frame.left + frame.width + 5, xLabelY);
+  }
+  if (labelOutside) {
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    // Always center v' / y cleanly between the top two drawn tick labels so it has wide breathing room!
+    let vNameY = frame.top + 18;
+    if (drawnTickYs.length >= 2) {
+      const sorted = [...drawnTickYs].sort((a, b) => a - b);
+      vNameY = (sorted[0]! + sorted[1]!) / 2;
+    } else if (drawnTickYs.length === 1) {
+      vNameY = drawnTickYs[0]! + 18;
+    }
+    if (vNameY >= 24 && vNameY <= h - 18) {
+      ctx.fillText(vAxisName, yLabelX, vNameY);
+    }
+  }
 }
 
-/**
- * Single entry point used by the controller. Dispatch keeps the caller
- * ignorant of which graticule implementation a mode needs.
- */
 export function drawGraticule(
   ctx: CanvasRenderingContext2D,
   o: ScopeOptions,
   gamuts: readonly PrimariesId[] = ['rec709'],
 ): void {
+  const effectiveGamuts = o.gamuts && o.gamuts.length > 0 ? o.gamuts : gamuts;
+  const bright = Math.max(0.35, Math.min(1.6, o.graticuleBrightness ?? 1));
+  ctx.save();
+  if (Math.abs(bright - 1) > 0.02) {
+    ctx.globalAlpha = Math.min(1, bright);
+  }
   switch (o.mode) {
     case 'vectorscope':
       drawVectorscopeGraticule(ctx, o);
       break;
     case 'cie':
-      drawCieGraticule(ctx, { ...o, gamuts: [...gamuts] });
+      drawCieGraticule(ctx, { ...o, gamuts: [...effectiveGamuts] });
+      break;
+    case 'histogram':
+      drawHistogramGraticule(ctx, o);
       break;
     default:
       drawWaveformGraticule(ctx, o);
   }
+  ctx.restore();
 }

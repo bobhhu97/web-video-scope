@@ -132,17 +132,27 @@ try {
       if (!cell) return { missing: true };
       const gpu = cell.querySelector('canvas.gpu');
       const grat = cell.querySelector('canvas.grat');
-      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-
-      const grab = async (c) => {
-        const bmp = await createImageBitmap(c);
-        const oc = new OffscreenCanvas(bmp.width, bmp.height);
-        const x = oc.getContext('2d');
-        x.drawImage(bmp, 0, 0);
-        return { w: bmp.width, h: bmp.height, d: x.getImageData(0, 0, bmp.width, bmp.height).data };
+      const grab = async (c, requireLit = false) => {
+        let last = null;
+        for (let attempt = 0; attempt < (requireLit ? 30 : 1); attempt++) {
+          await new Promise((r) => requestAnimationFrame(r));
+          const bmp = await createImageBitmap(c);
+          const oc = new OffscreenCanvas(bmp.width, bmp.height);
+          const x = oc.getContext('2d');
+          x.drawImage(bmp, 0, 0);
+          const d = x.getImageData(0, 0, bmp.width, bmp.height).data;
+          last = { w: bmp.width, h: bmp.height, d };
+          if (!requireLit) break;
+          let any = 0;
+          for (let i = 3; i < d.length; i += 16) {
+            if (d[i] > 8) { any++; if (any > 10) break; }
+          }
+          if (any > 10) break;
+        }
+        return last;
       };
-      const a = await grab(gpu);
-      const g = await grab(grat);
+      const a = await grab(gpu, true);
+      const g = await grab(grat, false);
 
       // Data layer: count lit pixels and their bounding box.
       let lit = 0, minX = a.w, maxX = -1, minY = a.h, maxY = -1;
@@ -208,18 +218,28 @@ try {
     Array.from(root.querySelectorAll('#modes button')).find((b) => b.textContent === 'CIE').click();
   });
   await new Promise((r) => setTimeout(r, 3000));
-  const shot = await page.evaluate(() => {
+  const shot = await page.evaluate(async () => {
     const root = document.getElementById('video-scopes-host').shadowRoot;
     const cell = root.querySelector('.cell');
-    const canvas = document.createElement('canvas');
     const a = cell.querySelector('canvas.gpu');
     const g = cell.querySelector('canvas.grat');
+    const canvas = document.createElement('canvas');
     canvas.width = a.width;
     canvas.height = a.height;
     const x = canvas.getContext('2d');
-    x.fillStyle = '#0d1117';
-    x.fillRect(0, 0, canvas.width, canvas.height);
-    x.drawImage(a, 0, 0);
+    for (let attempt = 0; attempt < 25; attempt++) {
+      await new Promise((r) => requestAnimationFrame(r));
+      const bmp = await createImageBitmap(a);
+      x.fillStyle = '#0d1117';
+      x.fillRect(0, 0, canvas.width, canvas.height);
+      x.drawImage(bmp, 0, 0);
+      const probe = x.getImageData(0, 0, canvas.width, canvas.height).data;
+      let lit = 0;
+      for (let i = 0; i < probe.length; i += 16) {
+        if (probe[i] > 25 || probe[i + 1] > 25 || probe[i + 2] > 25) { lit++; if (lit > 10) break; }
+      }
+      if (lit > 10) break;
+    }
     x.drawImage(g, 0, 0);
     return canvas.toDataURL('image/png');
   });

@@ -1,8 +1,8 @@
-# Privacy Policy — Video Scopes
+# Privacy Policy — Web Video Scope
 
 **Last updated: 2026-11-25**
 
-Video Scopes is a browser extension that displays technical measurements of video
+Web Video Scope is a browser extension that displays technical measurements of video
 playing in your browser.
 
 ## The short version

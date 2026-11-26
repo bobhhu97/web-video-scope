@@ -1,5 +1,5 @@
 {
-  "when": "2026-11-25T08:07:34.735Z",
+  "when": "2026-11-26T06:51:15.979Z",
   "results": [
     {
       "name": "host page has a playing video with metadata",
@@ -39,7 +39,7 @@
     {
       "name": "perf badge shows a live frame rate",
       "ok": true,
-      "detail": "18fps 4.1ms 0copy t1"
+      "detail": "3fps 0copy 474p"
     },
     {
       "name": "host is position:fixed with the documented z-index",
@@ -49,22 +49,22 @@
     {
       "name": "every panel has a sized GPU canvas",
       "ok": true,
-      "detail": "[{\"mode\":\"waveform-rgb\",\"w\":354,\"h\":203},{\"mode\":\"waveform-parade\",\"w\":354,\"h\":203},{\"mode\":\"vectorscope\",\"w\":354,\"h\":203},{\"mode\":\"cie\",\"w\":354,\"h\":203}]"
+      "detail": "[{\"mode\":\"waveform-rgb\",\"w\":383,\"h\":217},{\"mode\":\"waveform-parade\",\"w\":383,\"h\":217},{\"mode\":\"vectorscope\",\"w\":383,\"h\":217},{\"mode\":\"cie\",\"w\":383,\"h\":217}]"
     },
     {
       "name": "a scope canvas contains a rendered trace",
       "ok": true,
-      "detail": "316 lit px"
+      "detail": "690 lit px"
     },
     {
       "name": "zero-copy upload path is in use (no per-frame pixel copy)",
       "ok": true,
-      "detail": "18fps 4.1ms 0copy t1"
+      "detail": "3fps 0copy 474p"
     },
     {
       "name": "analysis reaches a steady frame rate near the source ceiling",
       "ok": true,
-      "detail": "33fps 0.5ms 0copy t0"
+      "detail": "60fps 2.8ms 0copy 474p"
     },
     {
       "name": "state persists visible=true to chrome.storage",
@@ -91,12 +91,12 @@
     {
       "name": "raw I420 plane mode renders a trace",
       "ok": true,
-      "detail": "316 lit px"
+      "detail": "690 lit px"
     },
     {
       "name": "raw mode keeps a usable frame rate",
       "ok": true,
-      "detail": "37fps 1.0ms 0copy t0"
+      "detail": "60fps 2.8ms raw 474p"
     },
     {
       "name": "Alt + pointer reports a pixel reading",

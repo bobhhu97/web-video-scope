@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Web Video Scope — demo</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: #06080a;
+    font: 13px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+    color: #cfdae2;
+  }
+  .page { display: flex; gap: 26px; padding: 22px 24px; align-items: flex-start; }
+  .main { width: 1010px; flex: 0 0 auto; }
+  .side { flex: 1 1 auto; min-width: 0; }
+  .brand { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; }
+  .mark { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(150deg, #7fd4ff, #3f7bd0 55%, #b96bff); }
+  .brand b { font-size: 14px; letter-spacing: 0.01em; color: #e6eff6; font-weight: 600; }
+  .brand span { color: #5f7180; font-size: 12px; }
+
+  .player { border: 1px solid #ffffff12; border-radius: 12px; overflow: hidden; background: #000; }
+  .chrome { display: flex; align-items: center; gap: 7px; padding: 9px 12px; background: #10161c; border-bottom: 1px solid #ffffff0d; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #2a333c; }
+  .file { margin-left: 8px; color: #7d8f9d; font: 11.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .stage { position: relative; background: #000; line-height: 0; }
+  canvas#pattern { display: none; }
+  video#video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; }
+
+  .meta { display: flex; align-items: baseline; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .meta h1 { font-size: 15px; font-weight: 600; margin: 0; color: #e6eff6; }
+  .meta em { font-style: normal; color: #62737f; font-size: 12px; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 999px; background: #141c23; border: 1px solid #ffffff12; color: #8ea3b2; font-size: 11px; }
+  .desc { color: #78899a; font-size: 12.5px; margin: 8px 0 0; max-width: 62ch; }
+</style>
+</head>
+<body>
+  <div class="page">
+    <div class="main">
+      <div class="brand">
+        <div class="mark"></div>
+        <b>Web Video Scope</b>
+        <span>· any video, measured</span>
+      </div>
+      <div class="player">
+        <div class="chrome">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          <span class="file" id="filename">sunset-dunes.mp4 — 1920×1080 · 23.976 fps · BT.709</span>
+        </div>
+        <div class="stage">
+          <canvas id="pattern" width="1920" height="1080"></canvas>
+          <video id="video" muted playsinline loop autoplay></video>
+        </div>
+      </div>
+      <div class="meta">
+        <h1 id="title">Sunset dunes — reference footage</h1>
+        <em>2:47</em>
+        <span class="pill">SDR</span>
+        <span class="pill">Rec.709</span>
+        <span class="pill" id="rangepill">limited range</span>
+      </div>
+      <p class="desc" id="desc">
+        A warm highlight roll-off against a cool shadow side. The waveform shows the
+        graded range, the vectorscope shows the warm/cool axis, and the CIE plot shows
+        how much of the sRGB gamut the grade actually uses.
+      </p>
+    </div>
+    <div class="side"></div>
+  </div>
+<script>
+const params = new URLSearchParams(location.search);
+const kind = params.get('pattern') ?? 'cinematic';
+const p = document.getElementById('pattern');
+const ctx = p.getContext('2d');
+const W = p.width, H = p.height;
+
+const COPY = {
+  cinematic: {
+    file: 'sunset-dunes.mp4 — 1920×1080 · 23.976 fps · BT.709',
+    title: 'Sunset dunes — reference footage',
+    desc: 'A warm highlight roll-off against a cool shadow side. The waveform shows the graded range, the vectorscope shows the warm/cool axis, and the CIE plot shows how much of the sRGB gamut the grade actually uses.',
+  },
+  bars: {
+    file: 'smpte-bars.mov — 1920×1080 · 25 fps · BT.709',
+    title: 'SMPTE 75% colour bars',
+    desc: 'The classic alignment signal. Each bar lands on its own target in the vectorscope, and the 75% white bar reads 75 IRE on a limited-range axis.',
+  },
+  spectrum: {
+    file: 'hue-sweep.mov — 1920×1080 · 25 fps · BT.709',
+    title: 'Hue × saturation sweep',
+    desc: 'A full sweep of hue at constant lightness. This is the fixture that shows the CIE plot filling in the way real footage does, rather than collapsing to a few dots.',
+  },
+};
+const copy = COPY[kind] ?? COPY.cinematic;
+document.getElementById('filename').textContent = copy.file;
+document.getElementById('title').textContent = copy.title;
+document.getElementById('desc').textContent = copy.desc;
+
+function cinematic() {
+  const sky = ctx.createLinearGradient(0, 0, 0, H * 0.62);
+  sky.addColorStop(0, '#0b2130');
+  sky.addColorStop(0.35, '#1d4b5c');
+  sky.addColorStop(0.62, '#7d6a55');
+  sky.addColorStop(0.82, '#e07a2f');
+  sky.addColorStop(1, '#ffc46b');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+
+  const sunY = H * 0.55, sunX = W * 0.66, r = H * 0.055;
+  const bloom = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, r * 6);
+  bloom.addColorStop(0, 'rgba(255,240,214,0.95)');
+  bloom.addColorStop(0.25, 'rgba(255,196,120,0.55)');
+  bloom.addColorStop(0.6, 'rgba(255,150,70,0.16)');
+  bloom.addColorStop(1, 'rgba(255,140,60,0)');
+  ctx.fillStyle = bloom;
+  ctx.fillRect(0, 0, W, H);
+  ctx.beginPath();
+  ctx.arc(sunX, sunY, r, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff3d6';
+  ctx.fill();
+
+  const layers = [
+    { y: 0.62, amp: 0.055, f: 1.1, c1: '#c99a63', c2: '#a06e42' },
+    { y: 0.70, amp: 0.040, f: 1.9, c1: '#7a5232', c2: '#4c3320' },
+    { y: 0.80, amp: 0.030, f: 2.7, c1: '#2b1e17', c2: '#120d0a' },
+  ];
+  layers.forEach((L, i) => {
+    const g = ctx.createLinearGradient(0, H * L.y, 0, H);
+    g.addColorStop(0, L.c1);
+    g.addColorStop(1, L.c2);
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 8) {
+      const t = x / W;
+      const y = H * (L.y + L.amp * Math.sin(t * Math.PI * 2 * L.f + i * 1.7)
+        + L.amp * 0.45 * Math.sin(t * Math.PI * 7 * (i + 1)));
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fillStyle = g;
+    ctx.fill();
+  });
+
+  ctx.globalCompositeOperation = 'lighter';
+  const rim = ctx.createLinearGradient(0, H * 0.72, 0, H * 0.86);
+  rim.addColorStop(0, 'rgba(255,170,90,0.10)');
+  rim.addColorStop(1, 'rgba(255,170,90,0)');
+  ctx.fillStyle = rim;
+  ctx.fillRect(0, H * 0.70, W, H * 0.18);
+  ctx.globalCompositeOperation = 'source-over';
+
+  const vig = ctx.createRadialGradient(W / 2, H / 2, H * 0.25, W / 2, H / 2, H * 0.95);
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.55)');
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function bars() {
+  // 75% bars in the upper two thirds, a luma ramp along the bottom eighth,
+  // and a black/white reference strip: the standard alignment layout.
+  const bars = ['#bfbfbf', '#bfbf00', '#00bfbf', '#00bf00', '#bf00bf', '#bf0000', '#0000bf', '#000000'];
+  const bw = W / bars.length;
+  bars.forEach((c, i) => {
+    ctx.fillStyle = c;
+    ctx.fillRect(Math.round(i * bw), 0, Math.ceil(bw), Math.round(H * 0.66));
+  });
+  for (let i = 0; i < 32; i++) {
+    const v = Math.round((i / 31) * 255);
+    ctx.fillStyle = `rgb(${v},${v},${v})`;
+    ctx.fillRect(Math.round((i * W) / 32), Math.round(H * 0.66), Math.ceil(W / 32), Math.round(H * 0.18));
+  }
+  const refs = [['#ffffff', 0.84], ['#000000', 0.92]];
+  refs.forEach(([c, y]) => {
+    ctx.fillStyle = c;
+    ctx.fillRect(0, Math.round(H * y), W, Math.round(H * 0.08) + 2);
+  });
+}
+
+function spectrum() {
+  const img = ctx.createImageData(W, H);
+  const l = 0.5;
+  for (let y = 0; y < H; y++) {
+    const s = y / (H - 1);
+    for (let x = 0; x < W; x++) {
+      const h = (x / W) * 360;
+      const c = (1 - Math.abs(2 * l - 1)) * s;
+      const hp = h / 60;
+      const X = c * (1 - Math.abs((hp % 2) - 1));
+      let r = 0, g = 0, b = 0;
+      if (hp < 1) { r = c; g = X; }
+      else if (hp < 2) { r = X; g = c; }
+      else if (hp < 3) { g = c; b = X; }
+      else if (hp < 4) { g = X; b = c; }
+      else if (hp < 5) { r = X; b = c; }
+      else { r = c; b = X; }
+      const m = l - c / 2;
+      const i = (y * W + x) * 4;
+      img.data[i] = Math.round((r + m) * 255);
+      img.data[i + 1] = Math.round((g + m) * 255);
+      img.data[i + 2] = Math.round((b + m) * 255);
+      img.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+({ cinematic, bars, spectrum }[kind] ?? cinematic)();
+
+const v = document.getElementById('video');
+window.__videoReady = false;
+v.addEventListener('loadedmetadata', () => { window.__videoReady = true; });
+v.srcObject = p.captureStream(30);
+v.play().catch(() => {});
+if (v.readyState >= 1) window.__videoReady = true;
+</script>
+</body>
+</html>

@@ -6,7 +6,7 @@
     "expectMin": 0,
     "status": "axis:limited",
     "maxIre": 100.1,
-    "minIre": 0.4,
+    "minIre": 1.1,
     "ok": true
   }
 ]

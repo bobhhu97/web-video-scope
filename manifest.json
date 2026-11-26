@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Video Scopes",
+  "name": "Web Video Scope",
   "version": "0.1.0",
   "description": "Waveform, vectorscope and CIE diagram overlay for any video on the web.",
   "minimum_chrome_version": "121",
@@ -11,35 +11,29 @@
     "tabCapture"
   ],
   "action": {
-    "default_title": "Toggle video scopes (Alt+S)",
+    "default_title": "Toggle Web Video Scope (Alt+S)",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",
       "48": "icons/icon-48.png"
     }
   },
+  "commands": {
+    "toggle-scopes": {
+      "suggested_key": {
+        "default": "Alt+S",
+        "mac": "Alt+S"
+      },
+      "description": "Toggle Web Video Scope"
+    }
+  },
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "<all_urls>"
-      ],
-      "js": [
-        "content.js"
-      ],
-      "run_at": "document_start",
-      "all_frames": false
-    }
-  ],
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
-  },
-  "host_permissions": [
-    "<all_urls>"
-  ]
+  }
 }

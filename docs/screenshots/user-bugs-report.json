@@ -1,0 +1,127 @@
+{
+  "results": [
+    {
+      "name": "waveform-rgb stays strictly inside graticule plot box after gain & resize",
+      "ok": true,
+      "detail": "in=7902, outside=0 (L:0 R:0 T:0 B:0) @ 766x384"
+    },
+    {
+      "name": "waveform-rgb maps 0..100% display levels onto 0..100 IRE (leaving headroom intact)",
+      "ok": true,
+      "detail": "min=-0.2 IRE, max=100.1 IRE"
+    },
+    {
+      "name": "waveform-parade stays strictly inside graticule plot box after gain & resize",
+      "ok": true,
+      "detail": "in=5185, outside=0 (L:0 R:0 T:0 B:0) @ 766x384"
+    },
+    {
+      "name": "waveform-parade maps 0..100% display levels onto 0..100 IRE (leaving headroom intact)",
+      "ok": true,
+      "detail": "min=-0.2 IRE, max=100.1 IRE"
+    },
+    {
+      "name": "vectorscope keeps every pixel inside the circle in a wide cell",
+      "ok": true,
+      "detail": "aspect=1.99:1 (766x384), outsideDisc=0"
+    },
+    {
+      "name": "vectorscope renders crisp points rather than chunky blobs",
+      "ok": true,
+      "detail": "lit=359 px (0.12% of canvas)"
+    },
+    {
+      "name": "all 6 SMPTE 75% colour bars land dead-on their vectorscope target boxes",
+      "ok": true,
+      "detail": "R:a=255@1.08px Y:a=255@0.92px G:a=255@1.43px C:a=255@1.11px B:a=255@1.08px M:a=255@0.57px"
+    },
+    {
+      "name": "playing static video with +/-1 LSB codec noise keeps bar trace sub-pixel steady (< 0.8 dev px)",
+      "ok": true,
+      "detail": "centroid span=0.001 dev px across 6 frames"
+    },
+    {
+      "name": "paused video freezes scopes cleanly with zero composited pixel jitter and 0fps badge",
+      "ok": true,
+      "detail": "pngByteDiff=0, perf=\"0fps 3.9ms 0copy 474p\""
+    },
+    {
+      "name": "no uncaught page or WebGPU errors",
+      "ok": true,
+      "detail": "clean"
+    }
+  ],
+  "waveBounds": [
+    {
+      "mode": "waveform-rgb",
+      "w": 766,
+      "h": 384,
+      "dpr": 2,
+      "inPlot": 7902,
+      "outLeft": 0,
+      "outRight": 0,
+      "outTop": 0,
+      "outBottom": 0,
+      "ireMax": 100.1,
+      "ireMin": -0.2
+    },
+    {
+      "mode": "waveform-parade",
+      "w": 766,
+      "h": 384,
+      "dpr": 2,
+      "inPlot": 5185,
+      "outLeft": 0,
+      "outRight": 0,
+      "outTop": 0,
+      "outBottom": 0,
+      "ireMax": 100.1,
+      "ireMin": -0.2
+    }
+  ],
+  "vecAudit": {
+    "w": 766,
+    "h": 384,
+    "aspect": 1.99,
+    "litTotal": 359,
+    "litFrac": 0.0012,
+    "outsideDisc": 0,
+    "hits": [
+      {
+        "name": "R",
+        "bestA": 255,
+        "bestDist": 1.08
+      },
+      {
+        "name": "Y",
+        "bestA": 255,
+        "bestDist": 0.92
+      },
+      {
+        "name": "G",
+        "bestA": 255,
+        "bestDist": 1.43
+      },
+      {
+        "name": "C",
+        "bestA": 255,
+        "bestDist": 1.11
+      },
+      {
+        "name": "B",
+        "bestA": 255,
+        "bestDist": 1.08
+      },
+      {
+        "name": "M",
+        "bestA": 255,
+        "bestDist": 0.57
+      }
+    ]
+  },
+  "noisyStability": {
+    "count": 6,
+    "spanPx": 0.001
+  },
+  "perfText": "0fps 3.9ms 0copy 474p"
+}
