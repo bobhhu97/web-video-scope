@@ -140,6 +140,7 @@ export interface I18nStrings {
   captureSaved: string;
   captureFailed: string;
   captureBusy: string;
+  captureGpuLimit: string;
 
   btnResetAll: string;
   btnDone: string;
@@ -288,6 +289,7 @@ const EN: I18nStrings = {
   captureSaved: 'Snapshot saved',
   captureFailed: 'Snapshot failed',
   captureBusy: 'Rendering snapshot…',
+  captureGpuLimit: 'GPU limit',
 
   btnResetAll: 'Reset All Defaults',
   btnDone: 'Done',
@@ -433,6 +435,7 @@ const ZH: I18nStrings = {
   captureSaved: '截图已保存',
   captureFailed: '截图失败',
   captureBusy: '正在渲染截图…',
+  captureGpuLimit: 'GPU 上限',
 
   btnResetAll: '恢复默认设置',
   btnDone: '完成',

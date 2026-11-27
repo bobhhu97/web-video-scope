@@ -169,7 +169,7 @@ try {
   const t = await capture({ format: 'png', scale: 2, background: 'transparent' });
   if (t.error) throw new Error(t.error);
   check('snapshot produces a PNG blob', t.mime === 'image/png', `${t.mime} ${t.bytes}B`);
-  check('snapshot honours the 2x multiplier', t.width > 0 && t.width === Math.round(t.width), `${t.width}x${t.height}`);
+  check('snapshot honours the 2x multiplier', t.scale === 2 && t.width > 0, `${t.width}x${t.height} @${t.scale}x`);
   check('transparent snapshot keeps alpha outside the trace', t.transparent > 0,
     `${t.transparent} transparent px of ${t.width * t.height}`);
   check('transparent snapshot still renders a trace', t.lit > 500, `${t.lit} lit px`);
@@ -231,17 +231,69 @@ try {
     const d = ctx.getImageData(0, 0, bandW, bmp.height).data;
     let lit = 0;
     for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 8) lit++;
+    const height = bmp.height;
     bmp.close();
-    return lit;
+    return { lit, bandW, height };
   });
-  check('graticule is composited into the export', marginLit > 200, `${marginLit} lit px in the axis margin`);
+  // Relative to the margin band's area so a resolution change cannot silently
+  // weaken this. Only the tick labels live in that band, so the ink is sparse
+  // (about 1.6% of it); a blank or trace-only export scores 0.
+  check(
+    'graticule is composited into the export',
+    marginLit.lit > marginLit.bandW * marginLit.height * 0.01,
+    `${marginLit.lit} lit px of ${marginLit.bandW}x${marginLit.height} margin`,
+  );
+
+  // ---- 5b. Higher multipliers keep the panel's brightness -----------------
+  // The phosphor model spreads one trace over more rows as the plot grows, so
+  // a 4x render used to come out visibly dimmer than the panel. `exportDensityGain`
+  // compensates; if it regresses, 4x falls well below 1x here.
+  const tone = await page.evaluate(async () => {
+    const canvas = document.querySelector('#video-scopes-host').shadowRoot.querySelector('.cell-stage canvas.gpu');
+    const slot = Number(canvas.closest('.cell').dataset.slot ?? 0);
+    const measure = async (scale) => {
+      const r = await window.__scopeDebug.capture(slot, { format: 'png', scale, background: 'panel' });
+      const bmp = await createImageBitmap(r.blob);
+      const c2d = document.createElement('canvas');
+      c2d.width = bmp.width;
+      c2d.height = bmp.height;
+      const ctx = c2d.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(bmp, 0, 0);
+      const d = ctx.getImageData(0, 0, bmp.width, bmp.height).data;
+      let sum = 0;
+      let n = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const lum = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+        if (lum > 26) { sum += lum; n += 1; }
+      }
+      bmp.close();
+      return n ? sum / n : 0;
+    };
+    return { one: await measure(1), four: await measure(4) };
+  });
+  check(
+    'a 4x export keeps the panel bright',
+    tone.four > tone.one * 0.8,
+    `4x mean ${tone.four.toFixed(1)} vs 1x ${tone.one.toFixed(1)}`,
+  );
 
   // ---- 6. Precision limit is surfaced, not swallowed ----------------------
   const limit = await page.evaluate(async () => {
     const dbg = window.__scopeDebug;
     return { dims: dbg?.dims ?? null, precision: dbg?.precision ?? null };
   });
-  check('export reports the analysis dimensions behind it', true, JSON.stringify(limit));
+  // The export must be driven by a real analysis texture, not a rescaled
+  // screen grab: the texture has to exist and stay within the preset caps.
+  check(
+    'export reports the analysis dimensions behind it',
+    !!limit.dims &&
+      Number.isFinite(limit.dims.width) &&
+      Number.isFinite(limit.dims.height) &&
+      limit.dims.width > 0 &&
+      limit.dims.height > 0 &&
+      Math.max(limit.dims.width, limit.dims.height) <= 1920,
+    JSON.stringify(limit),
+  );
 
   // ---- 7. Whole-layout export -------------------------------------------
   // Four cells, each with its own scope. The sheet must be a 2x2 grid whose
@@ -359,8 +411,10 @@ try {
   // would be ~9x flatter (h/w under 0.1), stacking brings it to roughly 0.5.
   check('triple sheet is stacked, not one flat row',
     triple.height / triple.width > 0.3, `${triple.width}x${triple.height} h/w ${(triple.height / triple.width).toFixed(2)}`);
+  // Each band must carry real ink, not one stray pixel from a seam.
+  const bandFloor = Math.max(2, Math.floor((triple.height / 3) * 0.02));
   check('triple sheet has content in all three rows',
-    triple.rows.every((n) => n > 0), triple.rows.join(','));
+    triple.rows.every((n) => n > bandFloor), `${triple.rows.join(',')} (floor ${bandFloor})`);
 
   check('no uncaught errors or WebGPU validation errors', errors.length === 0, errors.join(' | ') || 'clean');
 } finally {

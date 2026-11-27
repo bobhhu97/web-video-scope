@@ -41,7 +41,7 @@ import {
 import { GpuTimer } from '../core/gpu-timer';
 import { getDevice } from '../gpu/device';
 import type { AnalysisPreset } from '../gpu/downscale';
-import type { CaptureSettings } from '../core/scopes/capture-plan';
+import { describeSize, type CaptureSettings } from '../core/scopes/capture-plan';
 import { CursorProbeTooltip, Probe, formatSample, type ProbeSample } from '../ui/probe';
 import { openFloatingWindow, pipSupported, type FloatingWindow } from '../ui/pip';
 import { videoReadability, readabilityNotice, type Readability } from './readability';
@@ -841,7 +841,7 @@ function buildHandlers(): HudHandlers {
       hud.setNotice(t(state.lang).captureBusy);
       try {
         // No slot means "export what is on screen": a quad layout yields a 2x2
-        // sheet, triple yields one row of three. A slot narrows it to one panel.
+        // sheet, a triple layout a 1x3 column. A slot narrows it to one panel.
         const result =
           slot == null
             ? await controller.captureLayout(state.layout, state.capture)
@@ -855,7 +855,12 @@ function buildHandlers(): HudHandlers {
         a.remove();
         // Revoke on the next macrotask so Chrome has picked up the download.
         setTimeout(() => URL.revokeObjectURL(url), 60_000);
-        hud.setNotice(t(state.lang).captureSaved);
+        const strings = t(state.lang);
+        hud.setNotice(
+          result.clamped
+            ? `${strings.captureSaved} · ${strings.captureGpuLimit} ${describeSize(result.width, result.height)}`
+            : strings.captureSaved,
+        );
       } catch (err) {
         console.warn('[video-scopes] snapshot failed', err);
         hud.setNotice(t(state.lang).captureFailed);

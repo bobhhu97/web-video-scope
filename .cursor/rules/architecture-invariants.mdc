@@ -38,9 +38,10 @@ Manifest V3 Chrome 扩展，在任意网页 `<video>` 上叠加示波器。Chrom
 | --- | --- |
 | `src/core/` | 纯函数，必须能在 node 里单测，不得 import `chrome.*`、不得直接摸 DOM/GPU。唯一的 `navigator` 读取在 `transfer.ts` 的 `resolveDisplayTransferFix()` 里，必须保留 `typeof navigator !== 'undefined'` 守卫且允许外部传入 `platformHint` 覆盖 |
 | `src/gpu/` | 只做 GPU 资源与编码；不做 DOM，不做业务判定 |
-| `src/content/scope-controller.ts` | **唯一**持有 GPU 资源的类，生命周期由它 `destroy()` |
+| `src/content/scope-controller.ts` | 主 GPU 资源持有者：分析纹理、降采样器、每个 cell 的 renderer 都由它创建并 `destroy()` |
+| `src/content/scope-exporter.ts` | 截图导出专用的第二处 GPU 资源持有者。离屏渲染必须自己 `configure()` / `destroy()` / `unconfigure()` 并 `bitmap.close()`，与主渲染管线完全隔离——它读 controller 的 `AnalysisTexture`，但**绝不接管**主 canvas 或 controller 的 renderer |
 | `src/ui/hud.ts` | 只做 DOM 与事件，**不画像素**；像素由 gpu 层画在传入的 canvas 上 |
-| `src/ui/graticule.ts` | 2D canvas 刻度，按 key 缓存；`WAVE_PAD` 是与验证脚本共享的常量 |
+| `src/ui/graticule.ts` | 2D canvas 刻度绘制。本身不做缓存——`graticuleCacheKey()` / `graticuleKeys` 在 `scope-controller.ts` 里，按几何+选项 key 决定是否重画。`WAVE_PAD` 只在这个文件里定义，验证脚本（如 `verify-user-bugs.mjs`）是手抄的副本，改它要同步改脚本 |
 | `src/background/` | MV3 worker 会 ~30s 空闲退出，**模块级变量不得存状态**；状态放 `storage.session` |
 
 色彩常量（亮度系数、RGB→XYZ 矩阵、CIE 包围盒）只能来自 `src/core/color/`，
@@ -53,7 +54,22 @@ UI 与 shader 里都不许另写一份。坐标系映射（CIE / 矢量）唯一
 都是已安装用户的兼容面。产品改名时（曾经从 chrome-video-scopes 改成 Web Video Scope）
 只改清单、文案、文档，内部 id 保持不动。
 
-## 五、新增源文件的最低要求
+## 五、截图导出必须与屏幕一致
+
+截图是**离屏重渲染**，不是 `captureStream`/`drawImage` 截屏：读 controller 当前的分析纹理，
+用同一份 `ScopeOptions` 重新 encode 一遍。
+
+- 几何唯一的正确姿势：`width/height` 传面板 **CSS 尺寸**，倍率传 `dpr`。所有内边距
+  （`WAVE_PAD`、vectorscope 圆环、CIE 边距）都乘 `dpr`，这样 1×/2×/4× 出图严格等比。
+- 一个 `GPUCanvasContext` 只有一个 `getCurrentTexture()`，**多格导出必须一格一个
+  `OffscreenCanvas`**，不能共用。
+- `drawGraticule()` 四个入口都以 `clearRect()` 开头，必须画在独立图层再合成，
+  否则会擦掉下层轨迹。
+- 导出底色照抄屏幕：`PANEL_BG`/`GRID_BG` 必须与 `hud.ts` 里 `.cell`/`.grid` 的 CSS 一致。
+- 倍率高于面板 `dpr` 时按 `exportDensityGain()` 补增益，否则轨迹会被摊薄变暗。
+  细节上限仍由分析精度决定——倍率只放大像素，不创造细节。
+
+## 六、新增源文件的最低要求
 
 每个新增源文件必须有对应的 Vitest 单测，或明确写进某个 `scripts/verify-*.mjs` 的浏览器断言。
 提交信息用 Conventional Commits（`feat:` / `fix:` / `test:` / `chore:` / `docs:` / `perf:`）。

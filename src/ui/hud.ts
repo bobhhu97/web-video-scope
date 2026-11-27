@@ -9,13 +9,14 @@ import {
   presetAvailable,
   type PrecisionMode,
 } from '../gpu/downscale';
-import type {
-  HistChannelMode,
-  ParadeMode,
-  ScopeMode,
-  ToneFilter,
-  TraceColorMode,
-  WaveChannelMode,
+import {
+  planesForOptions,
+  type HistChannelMode,
+  type ParadeMode,
+  type ScopeMode,
+  type ToneFilter,
+  type TraceColorMode,
+  type WaveChannelMode,
 } from '../gpu/scope-renderer';
 import { WAVE_PAD } from './graticule';
 import { t, type I18nStrings, type Locale } from './i18n';
@@ -1087,6 +1088,9 @@ export class Hud {
 
     setText('hdr-title', s.appTitle);
     setText('lang-btn', (this.state.lang ?? 'en') === 'zh' ? 'EN' : '中文');
+    // The shortcut hint has to follow the language too, otherwise switching
+    // locales leaves the old sentence on the camera button.
+    root.getElementById('capture-btn')?.setAttribute('title', s.captureHint);
     setText('eyedropper-btn', `⊕ ${s.eyedropper}`);
     setText('false-color-btn', `◐ ${this.state.videoFalseColor ? s.falseColorOn : s.falseColor}`);
     setText('drawer-title', s.signalHdrSection);
@@ -2022,11 +2026,6 @@ export class Hud {
   /** Last known source video height, used to enable or grey out the presets. */
   private lastSourceHeight: number | undefined;
 
-  setSourceWidth(width: number | undefined): void {
-    this.lastSourceWidth = width && width > 0 ? width : undefined;
-    if (this.settingsOpen) this.renderCaptureSizeHint();
-  }
-
   /**
    * Recording the source size keeps the precision menu honest: a preset that
    * would only upscale the picture is greyed out instead of silently wasting
@@ -2057,7 +2056,7 @@ export class Hud {
     return rows
       .map(
         (row) =>
-          `<option value="${row.value}" data-precision="${row.value}">${row.label}</option>`,
+          `<option value="${row.value}">${row.label}</option>`,
       )
       .join('');
   }
@@ -2077,6 +2076,12 @@ export class Hud {
       option.disabled = !ok;
       option.title = ok ? '' : title;
     }
+    // A disabled option cannot be focused, so the explanation has to live on
+    // the closed <select> as well.
+    const blocked = Array.from(sel.querySelectorAll<HTMLOptionElement>('option')).some(
+      (option) => option.disabled,
+    );
+    sel.title = blocked ? title : '';
     // If the saved preset became unusable, fall back to whichever tier still
     // works instead of silently drawing an upscaled texture.
     if (this.state.precision !== 'auto') {
@@ -2107,6 +2112,19 @@ export class Hud {
     }
   }
 
+  /** Plane count the exporter will size this panel's density buffer against. */
+  private planesForPanel(target: PanelTargets): number {
+    const cell = resolveCells(this.state, this.state.layout)[target.slot];
+    return planesForOptions({
+      mode: target.mode,
+      channel: 0,
+      waveChannels: cell?.waveChannels,
+      paradeMode: cell?.paradeMode,
+      histMode: cell?.histMode,
+      traceMode: cell?.traceMode,
+    });
+  }
+
   /**
    * Show the pixel size the next snapshot will produce, so "3x" is not a
    * mystery number and a clamped result is visible before it happens.
@@ -2129,7 +2147,9 @@ export class Hud {
         cssWidth: Math.max(1, Math.round(p.gpu.clientWidth)),
         cssHeight: Math.max(1, Math.round(p.gpu.clientHeight)),
         mode: p.mode,
-        planes: 4,
+        // Same plane count the exporter will size its density buffer against,
+        // so the hint cannot promise a size the real clamp would refuse.
+        planes: this.planesForPanel(p),
       })),
       scale: capture.scale,
       sourceWidth: this.lastSourceWidth,
@@ -2146,7 +2166,7 @@ export class Hud {
     const label = capture.scale === 'match' ? 'match' : `${capture.scale}×`;
     const shape = `${plan.cols}×${plan.rows}`;
     hint.textContent = plan.clamped
-      ? `${size} ${shape} (${label} · GPU limit)`
+      ? `${size} ${shape} (${label} · ${this.i18n().captureGpuLimit})`
       : `${size} ${shape} (${label})`;
   }
 
@@ -2348,11 +2368,14 @@ export class Hud {
     root.getElementById('perf')?.addEventListener('click', () => this.handlers.onToggleLock());
 
     root.getElementById('capture-btn')?.addEventListener('click', (e: Event) => {
-      // Plain click exports the whole layout (4-up in quad, one row in triple);
-      // Shift/Alt narrows it to just the active panel.
+      // Plain click exports the whole layout (2x2 in quad, a 1x3 column in
+      // triple); Shift/Alt narrows it to just the active panel.
       const single = (e as MouseEvent).shiftKey || (e as MouseEvent).altKey;
       this.handlers.onCapture?.(single ? this.activeSlotIndex() : undefined);
     });
+    // The template carries the plain label; the shortcut hint is long and only
+    // belongs in the tooltip. applyLocalization() re-applies it on locale change.
+    root.getElementById('capture-btn')?.setAttribute('title', this.i18n().captureHint);
 
     root.getElementById('lang-btn')?.addEventListener('click', () => {
       const lang: Locale = (this.state.lang ?? 'en') === 'zh' ? 'en' : 'zh';

@@ -37,6 +37,14 @@ describe('analysisSize', () => {
     expect(analysisSize(640, 360, 'default')).toEqual({ width: 640, height: 360 });
   });
 
+  it('rejects non-finite source sizes instead of allocating a NaN texture', () => {
+    // A detached <video> reports NaN dimensions; `NaN <= 0` is false, so this
+    // has to be an explicit finiteness check.
+    expect(analysisSize(Number.NaN, 1080, 'full')).toEqual({ width: 1, height: 1 });
+    expect(analysisSize(1920, Number.NaN, 'default')).toEqual({ width: 1, height: 1 });
+    expect(analysisSize(Number.POSITIVE_INFINITY, 1080, 'full')).toEqual({ width: 1, height: 1 });
+  });
+
   it('presets are defined by long edge', () => {
     expect(ANALYSIS_SIZES.low).toBe(320);
     expect(ANALYSIS_SIZES.default).toBe(640);

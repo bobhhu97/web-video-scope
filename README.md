@@ -209,8 +209,9 @@ Two things worth knowing. First, **export resolution is not analysis
 precision** — the trace is whatever the analysis texture holds, magnified. For
 true per-pixel detail set the precision preset to `Full 1:1` before capturing.
 Second, the multiplier is clamped to the GPU's texture and storage-buffer
-limits; when that happens the settings sheet shows the reduced size and the
-saved image reports `clamped` instead of silently downscaling.
+limits. The settings sheet previews the size it can actually produce, and when a
+capture ends up smaller than requested the notice bar says so (`GPU limit` plus
+the real pixel size) instead of silently downscaling.
 
 ## Install
 
@@ -250,14 +251,14 @@ working in fullscreen.
 ## Development
 
 ```bash
-pnpm test              # unit tests (vitest) — 311 tests
+pnpm test              # unit tests (vitest) — 343 tests
 pnpm build             # production bundle
 pnpm verify:manifest   # manifest, CSP and bundle integrity — 31 checks
 pnpm verify:e2e        # injects the built content script on a live <video> — 24 checks
 pnpm verify:ui         # panel layout, geometry, IRE axis — 15 checks
 pnpm verify:scatter    # vectorscope + CIE point clouds, locus, fill — 12 checks
 pnpm verify:cie        # CIE 1:1 axes, grid squareness, zoom, pickers — 12 checks
-pnpm verify:capture    # snapshot export: alpha, opacity, size, graticule — 13 checks
+pnpm verify:capture    # snapshot export: alpha, opacity, size, graticule — 23 checks
 pnpm bench:upload      # zero-copy vs copying upload
 pnpm capture:readme    # regenerate every image in this document
 ```

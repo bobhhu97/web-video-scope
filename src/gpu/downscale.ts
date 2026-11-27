@@ -85,7 +85,12 @@ export function analysisSize(
   preset: AnalysisPreset,
   maxPixels = PRESET_MAX_PIXELS[preset],
 ): { width: number; height: number } {
-  if (srcW <= 0 || srcH <= 0) return { width: MIN_DIM, height: MIN_DIM };
+  // Reject non-finite and non-positive sources alike: a detached <video> can
+  // report NaN, and `NaN <= 0` is false, so a plain comparison would let NaN
+  // through into a texture allocation.
+  if (!Number.isFinite(srcW) || !Number.isFinite(srcH) || srcW <= 0 || srcH <= 0) {
+    return { width: MIN_DIM, height: MIN_DIM };
+  }
   const long = Math.max(srcW, srcH);
   const target = ANALYSIS_SIZES[preset];
   const scale = long <= target ? 1 : target / long;

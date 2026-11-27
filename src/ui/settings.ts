@@ -12,7 +12,7 @@ import type { PrimariesId } from '../core/color/primaries';
 import type { RangeMode } from '../core/range-detector';
 import type { HdrMode, Unit } from '../core/scale/units';
 import type { Locale } from './i18n';
-import { DEFAULT_CAPTURE, type CaptureSettings } from '../core/scopes/capture-plan';
+import { DEFAULT_CAPTURE, normalizeCapture, type CaptureSettings } from '../core/scopes/capture-plan';
 
 export type Layout = 'single' | 'pair' | 'triple' | 'grid';
 
@@ -241,7 +241,7 @@ export async function loadSettings(): Promise<HudState> {
       ...DEFAULT_STATE,
       ...raw,
       probeConfig: { ...DEFAULT_PROBE_CONFIG, ...(raw.probeConfig ?? {}) },
-      capture: { ...DEFAULT_CAPTURE, ...(raw.capture ?? {}) },
+      capture: normalizeCapture(raw.capture),
       // `native` was renamed to `fhd`; keep existing installs on the same tier.
       precision: normalizePrecision(raw.precision ?? DEFAULT_STATE.precision),
       cells: raw.cells ?? {},

@@ -252,9 +252,9 @@ export class ScopeController {
   }
 
   /**
-   * Diagnostic snapshot of the options a slot is currently rendering with.
-   * Used by the capture probes to prove that the export path reads the same
-   * gain/gamma the live renderer holds.
+   * Read-only snapshot of the options a slot is currently rendering with.
+   * Exposed through `__scopeDebug.options(slot)` so a browser probe can compare
+   * the live renderer against what an export produces.
    */
   optionSnapshot(slot: number): ScopeOptions | null {
     const target = this.targets.find((t) => t.slot === slot);

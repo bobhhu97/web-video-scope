@@ -13,6 +13,7 @@ import {
   exportDensityGain,
   formatInfo,
   graticuleThemeFor,
+  normalizeCapture,
   planCapture,
   planCaptureLayout,
   type CaptureLayoutRequest,
@@ -82,23 +83,67 @@ describe('planCapture', () => {
     expect(5 * w * h * 4).toBeLessThanOrEqual(LIMITS.maxDensityBytes);
   });
 
+  it('treats a missing or broken source width as no match target', () => {
+    // 0 reaches here before the video reports metadata; NaN from a detached
+    // element. Both must mean "do not rescale", not "export a 48x27 stamp".
+    for (const sourceWidth of [0, 1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const plan = planCapture(req({ scale: 'match', sourceWidth }));
+      expect(plan.requestedScale).toBe(1);
+      expect(plan.width).toBe(480);
+    }
+  });
+
   it('never returns a zero-sized image', () => {
     const plan = planCapture(
       req({ cssWidth: 0, cssHeight: 0, scale: 4, maxEdge: 1, maxDensityBytes: 256 }),
     );
+    expect(plan.cssWidth).toBe(1);
+    expect(plan.cssHeight).toBe(1);
     expect(plan.width).toBeGreaterThanOrEqual(1);
     expect(plan.height).toBeGreaterThanOrEqual(1);
   });
 
-  it('does not pad vectorscope or cie, which draw edge to edge', () => {
-    const wide = planCapture(req({ mode: 'vectorscope', cssWidth: 400, cssHeight: 300, planes: 1 }));
-    const histogram = planCapture(req({ mode: 'histogram', cssWidth: 400, cssHeight: 300, planes: 1 }));
-    // CIE/vectorscope can afford a larger scale for the same density budget.
-    expect(wide.scale).toBeGreaterThanOrEqual(histogram.scale);
+  it('ignores the gutter for vectorscope and cie, which draw edge to edge', () => {
+    // Full-bleed modes must not shrink their plot for a padding they never
+    // draw, so changing WAVE_PAD cannot move their plan at all.
+    const tight = { maxDensityBytes: 1024 * 1024 };
+    const noPad = { top: 0, right: 0, bottom: 0, left: 0 };
+    const fatPad = { top: 40, right: 40, bottom: 40, left: 40 };
+    for (const mode of ['vectorscope', 'cie'] as const) {
+      const a = planCapture(req({ mode, cssWidth: 400, cssHeight: 300, planes: 1, ...tight, wavePad: noPad }));
+      const b = planCapture(req({ mode, cssWidth: 400, cssHeight: 300, planes: 1, ...tight, wavePad: fatPad }));
+      expect(b).toEqual(a);
+    }
+    // The padded modes do react, which is what proves the check above is real.
+    const plain = planCapture(req({ cssWidth: 400, cssHeight: 300, planes: 1, ...tight, wavePad: noPad }));
+    const padded = planCapture(req({ cssWidth: 400, cssHeight: 300, planes: 1, ...tight, wavePad: fatPad }));
+    expect(padded.scale).not.toBe(plain.scale);
   });
 
   it('offers the documented multiplier set', () => {
     expect(CAPTURE_SCALE_OPTIONS).toEqual([1, 2, 3, 4, 'match']);
+  });
+});
+
+describe('normalizeCapture', () => {
+  it('keeps a valid persisted setting untouched', () => {
+    expect(normalizeCapture({ format: 'webp', scale: 4, background: 'white' })).toEqual({
+      format: 'webp',
+      scale: 4,
+      background: 'white',
+    });
+  });
+
+  it('repairs every field a stale storage blob can corrupt', () => {
+    expect(normalizeCapture({ format: 'gif', scale: 9, background: 'blue' })).toEqual(DEFAULT_CAPTURE);
+    expect(normalizeCapture({ scale: 'native' })).toEqual(DEFAULT_CAPTURE);
+  });
+
+  it('survives a missing or non-object value', () => {
+    expect(normalizeCapture(undefined)).toEqual(DEFAULT_CAPTURE);
+    expect(normalizeCapture(null)).toEqual(DEFAULT_CAPTURE);
+    expect(normalizeCapture('png')).toEqual(DEFAULT_CAPTURE);
+    expect(normalizeCapture(7)).toEqual(DEFAULT_CAPTURE);
   });
 });
 
@@ -164,7 +209,15 @@ describe('exportDensityGain', () => {
   it('assumes no compensation when the panel dpr is unknown', () => {
     expect(exportDensityGain(4, undefined)).toBe(1);
     expect(exportDensityGain(4, 0)).toBe(1);
+    expect(exportDensityGain(4, -2)).toBe(1);
     expect(exportDensityGain(4, Number.NaN)).toBe(1);
+    expect(exportDensityGain(4, Number.POSITIVE_INFINITY)).toBe(1);
+  });
+
+  it('is a no-op inside the tolerance band and for non-finite scales', () => {
+    expect(exportDensityGain(2.02, 2)).toBe(1);
+    expect(exportDensityGain(Number.NaN, 2)).toBe(1);
+    expect(exportDensityGain(Number.POSITIVE_INFINITY, 2)).toBe(1);
   });
 });
 
@@ -281,5 +334,82 @@ describe('planCaptureLayout', () => {
     const at = new Date(2026, 0, 2, 3, 4, 5);
     expect(captureSheetFileName('grid', at, 'png')).toBe('scopes-grid-20260102-030405.png');
     expect(captureSheetFileName('triple', at, 'jpeg')).toBe('scopes-triple-20260102-030405.jpg');
+  });
+
+  it('stacks a triple layout into one column, top to bottom', () => {
+    // The user asked for the sheet to mirror the on-screen 1x3 stack, so the
+    // three cells must share an x and march down the canvas without overlap.
+    const plan = planCaptureLayout(
+      layoutReq({
+        grid: 'triple',
+        slots: [0, 1, 2],
+        cells: [
+          { cssWidth: 480, cssHeight: 270, mode: 'waveform-luma', planes: 1 },
+          { cssWidth: 480, cssHeight: 270, mode: 'histogram', planes: 4 },
+          { cssWidth: 480, cssHeight: 270, mode: 'vectorscope', planes: 1 },
+        ],
+      }),
+    );
+    expect(plan.cols).toBe(1);
+    expect(plan.rows).toBe(3);
+    expect(plan.cells).toHaveLength(3);
+    const [a, b, c] = plan.cells;
+    expect(b!.x).toBe(a!.x);
+    expect(c!.x).toBe(a!.x);
+    expect(b!.y).toBeGreaterThan(a!.y);
+    expect(c!.y).toBeGreaterThan(b!.y);
+    expect(c!.y).toBeGreaterThanOrEqual(b!.y + b!.height);
+    expect(plan.height).toBeGreaterThan(plan.width);
+    for (const cell of plan.cells) {
+      expect(cell.x).toBeGreaterThanOrEqual(0);
+      expect(cell.y).toBeGreaterThanOrEqual(0);
+      expect(cell.x + cell.width).toBeLessThanOrEqual(plan.width);
+      expect(cell.y + cell.height).toBeLessThanOrEqual(plan.height);
+    }
+  });
+
+  it('does not report a GPU clamp when only the smallest cell limits match', () => {
+    // `'match'` resolves against the widest tile, which is also the cell that
+    // limits the shared scale. A narrower first cell used to inflate
+    // `requestedScale` and paint a bogus "GPU limit" warning.
+    const plan = planCaptureLayout(
+      layoutReq({
+        scale: 'match',
+        sourceWidth: 1920,
+        slots: [0, 1],
+        cells: [
+          { cssWidth: 480, cssHeight: 270, mode: 'waveform-luma', planes: 1 },
+          { cssWidth: 960, cssHeight: 540, mode: 'waveform-luma', planes: 1 },
+        ],
+      }),
+    );
+    expect(plan.requestedScale).toBeCloseTo(2, 5);
+    expect(plan.clamped).toBe(false);
+  });
+
+  it('falls back to 1x for match when the source width is not known yet', () => {
+    const plan = planCaptureLayout(layoutReq({ scale: 'match', sourceWidth: 0 }));
+    expect(plan.requestedScale).toBe(1);
+    expect(plan.clamped).toBe(false);
+    expect(plan.width).toBeGreaterThan(100);
+  });
+
+  it('tolerates a missing gap instead of emitting NaN geometry', () => {
+    const plan = planCaptureLayout(layoutReq({ gap: undefined as unknown as number }));
+    expect(Number.isFinite(plan.width)).toBe(true);
+    expect(Number.isFinite(plan.height)).toBe(true);
+    for (const cell of plan.cells) {
+      expect(Number.isFinite(cell.x)).toBe(true);
+      expect(Number.isFinite(cell.y)).toBe(true);
+    }
+  });
+
+  it('returns a finite empty plan without a wave pad', () => {
+    const plan = planCaptureLayout(
+      layoutReq({ slots: [], cells: [], wavePad: undefined as never, gap: undefined as unknown as number }),
+    );
+    expect(plan.cells).toHaveLength(0);
+    expect(Number.isFinite(plan.width)).toBe(true);
+    expect(plan.width).toBeGreaterThanOrEqual(1);
   });
 });

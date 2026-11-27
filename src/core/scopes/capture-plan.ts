@@ -52,6 +52,30 @@ export const PAPER_BG = '#ffffff';
 /** Multipliers offered in the settings sheet, in display order. */
 export const CAPTURE_SCALE_OPTIONS: readonly CaptureScale[] = [1, 2, 3, 4, 'match'];
 
+const CAPTURE_FORMATS: readonly CaptureFormat[] = ['png', 'jpeg', 'webp'];
+const CAPTURE_BACKGROUNDS: readonly CaptureBackground[] = ['panel', 'transparent', 'white'];
+
+/**
+ * Coerce a persisted blob back into a valid `CaptureSettings`.
+ *
+ * `chrome.storage.local` survives downgrades and hand edits, so a stale or
+ * corrupt value must never reach the planner — an unknown scale would otherwise
+ * turn every export into a NaN-sized plan.
+ */
+export function normalizeCapture(raw: unknown): CaptureSettings {
+  const value = (raw ?? {}) as Partial<Record<keyof CaptureSettings, unknown>>;
+  const format = CAPTURE_FORMATS.includes(value.format as CaptureFormat)
+    ? (value.format as CaptureFormat)
+    : DEFAULT_CAPTURE.format;
+  const scale = CAPTURE_SCALE_OPTIONS.includes(value.scale as CaptureScale)
+    ? (value.scale as CaptureScale)
+    : DEFAULT_CAPTURE.scale;
+  const background = CAPTURE_BACKGROUNDS.includes(value.background as CaptureBackground)
+    ? (value.background as CaptureBackground)
+    : DEFAULT_CAPTURE.background;
+  return { format, scale, background };
+}
+
 export interface CaptureLimits {
   /** `maxTextureDimension2D` of the device — no canvas edge may exceed it. */
   maxEdge: number;
@@ -124,18 +148,28 @@ function largestFittingScale(req: CapturePlanRequest, requested: number): number
   const cssH = Math.max(1, req.cssHeight);
   const edgeCap = Math.min(req.maxEdge / cssW, req.maxEdge / cssH);
   let s = Math.min(requested, edgeCap);
-  // Density grows with the square of the scale, so shrink geometrically and
-  // then trim in 0.05 steps; three passes is plenty for the 0.05 grid.
-  for (let pass = 0; pass < 3; pass += 1) {
-    for (let guard = 0; guard < 200; guard += 1) {
-      const width = Math.max(1, Math.round(cssW * s));
-      const height = Math.max(1, Math.round(cssH * s));
-      if (densityBytes(req, width, height, s) <= req.maxDensityBytes) return s;
-      s = Math.max(0.05, s * 0.9);
-      if (s <= 0.05) return 0.05;
-    }
+  // Density grows with the square of the scale, so shrink geometrically. The
+  // floor of 0.05 wins over the density budget: below that the export would be
+  // too small to read, and no shipping device is anywhere near this branch.
+  for (let guard = 0; guard < 200; guard += 1) {
+    const width = Math.max(1, Math.round(cssW * s));
+    const height = Math.max(1, Math.round(cssH * s));
+    if (densityBytes(req, width, height, s) <= req.maxDensityBytes) return s;
+    s = Math.max(0.05, s * 0.9);
+    if (s <= 0.05) return 0.05;
   }
   return Math.max(0.05, Math.min(s, 1));
+}
+
+/**
+ * Multiplier implied by `'match'`: the export should be as wide as the source
+ * video. A missing or nonsensical source width (0 before the video reports its
+ * metadata, NaN from a detached element) falls back to the panel width, so the
+ * multiplier is 1 instead of collapsing to an unreadable thumbnail.
+ */
+function matchSourceScale(sourceWidth: number | undefined, cssWidth: number): number {
+  if (!sourceWidth || !Number.isFinite(sourceWidth) || sourceWidth < 2) return 1;
+  return Math.max(0.1, sourceWidth / cssWidth);
 }
 
 /**
@@ -146,10 +180,7 @@ function largestFittingScale(req: CapturePlanRequest, requested: number): number
 export function planCapture(req: CapturePlanRequest): CapturePlan {
   const cssW = Math.max(1, req.cssWidth);
   const cssH = Math.max(1, req.cssHeight);
-  const requested =
-    req.scale === 'match'
-      ? Math.max(0.1, (req.sourceWidth ?? cssW) / cssW)
-      : req.scale;
+  const requested = req.scale === 'match' ? matchSourceScale(req.sourceWidth, cssW) : req.scale;
   const scale = largestFittingScale({ ...req, cssWidth: cssW, cssHeight: cssH }, requested);
   const width = Math.max(1, Math.min(req.maxEdge, Math.round(cssW * scale)));
   const height = Math.max(1, Math.min(req.maxEdge, Math.round(cssH * scale)));
@@ -301,6 +332,9 @@ export function planCaptureLayout(req: CaptureLayoutRequest): CaptureLayoutPlan 
   const shape = captureGridShape(req.grid);
   const n = Math.min(shape.cells, req.slots.length, req.cells.length);
 
+  const gap = Number.isFinite(req.gap) ? Math.max(0, req.gap) : 0;
+  const wavePad = req.wavePad ?? { top: 0, right: 0, bottom: 0, left: 0 };
+
   if (n === 0) {
     return {
       ...planCapture({
@@ -310,7 +344,7 @@ export function planCaptureLayout(req: CaptureLayoutRequest): CaptureLayoutPlan 
         scale: req.scale,
         mode: 'waveform-luma',
         planes: 1,
-        wavePad: req.wavePad,
+        wavePad,
       }),
       cols: shape.cols,
       rows: shape.rows,
@@ -332,24 +366,23 @@ export function planCaptureLayout(req: CaptureLayoutRequest): CaptureLayoutPlan 
       sourceWidth: req.sourceWidth,
       mode: cell.mode,
       planes: cell.planes,
-      wavePad: req.wavePad,
+      wavePad,
     });
     scale = Math.min(scale, one.scale);
   }
   if (!Number.isFinite(scale)) scale = 1;
   scale = Math.max(0.05, scale);
 
-  const first = taken[0]!;
-  const requested =
-    req.scale === 'match'
-      ? Math.max(0.1, (req.sourceWidth ?? first.cssWidth) / first.cssWidth)
-      : (req.scale as number);
-
   // Uniform tile in CSS pixels: the largest cell drives the tile so no cell is
   // letterboxed; smaller cells centre inside it.
-  const tileCssW = Math.max(...taken.map((c) => c.cssWidth));
-  const tileCssH = Math.max(...taken.map((c) => c.cssHeight));
-  const gapPx = Math.max(0, Math.round(req.gap * scale));
+  const tileCssW = Math.max(1, ...taken.map((c) => c.cssWidth));
+  const tileCssH = Math.max(1, ...taken.map((c) => c.cssHeight));
+  // `scale` above is the minimum across cells, so `'match'` must take its
+  // denominator from the widest cell too — otherwise a narrower first cell
+  // inflates `requested` and the sheet falsely reports a GPU clamp.
+  const requested =
+    req.scale === 'match' ? matchSourceScale(req.sourceWidth, tileCssW) : (req.scale as number);
+  const gapPx = Math.max(0, Math.round(gap * scale));
 
   const totalW = shape.cols * Math.round(tileCssW * scale) + gapPx * (shape.cols + 1);
   const totalH = shape.rows * Math.round(tileCssH * scale) + gapPx * (shape.rows + 1);
@@ -363,15 +396,20 @@ export function planCaptureLayout(req: CaptureLayoutRequest): CaptureLayoutPlan 
 
   const cellW = Math.max(1, Math.round(tileCssW * scale));
   const cellH = Math.max(1, Math.round(tileCssH * scale));
-  const finalGap = Math.max(0, Math.round(req.gap * scale));
-  const width = Math.max(1, Math.min(req.limits.maxEdge, shape.cols * cellW + finalGap * (shape.cols + 1)));
-  const height = Math.max(1, Math.min(req.limits.maxEdge, shape.rows * cellH + finalGap * (shape.rows + 1)));
+  const finalGap = Math.max(0, Math.round(gap * scale));
+  // No second `maxEdge` clamp: `edgeFit` already sized the sheet to fit, and
+  // clipping here alone would leave the cell offsets pointing outside the
+  // bitmap whenever the 0.05 scale floor won.
+  const width = Math.max(1, shape.cols * cellW + finalGap * (shape.cols + 1));
+  const height = Math.max(1, shape.rows * cellH + finalGap * (shape.rows + 1));
 
   const cells: CaptureCell[] = taken.map((cell, i) => {
     const col = i % shape.cols;
     const row = Math.floor(i / shape.cols);
-    const cw = Math.max(1, Math.round(cell.cssWidth * scale));
-    const ch = Math.max(1, Math.round(cell.cssHeight * scale));
+    const cellCssW = Math.max(1, cell.cssWidth);
+    const cellCssH = Math.max(1, cell.cssHeight);
+    const cw = Math.max(1, Math.round(cellCssW * scale));
+    const ch = Math.max(1, Math.round(cellCssH * scale));
     // Centre a smaller cell inside its tile.
     const x = finalGap + col * (cellW + finalGap) + Math.floor((cellW - cw) / 2);
     const y = finalGap + row * (cellH + finalGap) + Math.floor((cellH - ch) / 2);
@@ -381,8 +419,8 @@ export function planCaptureLayout(req: CaptureLayoutRequest): CaptureLayoutPlan 
       y,
       width: cw,
       height: ch,
-      cssWidth: cell.cssWidth,
-      cssHeight: cell.cssHeight,
+      cssWidth: cellCssW,
+      cssHeight: cellCssH,
     };
   });
 
