@@ -31,6 +31,7 @@ chrome://extensions → Developer mode → Load unpacked → unzipped folder →
 - [Architecture](#architecture)
 - [Known limitations & privacy](#known-limitations)
 - [Open source, credits & licence](#open-source-credits--licence)
+- [Changelog](#changelog)
 - [Prior art](#prior-art)
 
 ---
@@ -379,6 +380,35 @@ specifications and design references, not copied code.
 The demonstration video frame is from
 [youtube.com/watch?v=dQw4w9WgXcQ](https://www.youtube.com/watch?v=dQw4w9WgXcQ)
 and remains © its respective rights holders.
+
+## Changelog
+
+### 0.1.1 — 2026-11-27
+
+- **Full-resolution analysis.** A new `Full` precision preset analyses the video
+  at the source's own resolution (up to 8192 px, clamped to the device's WebGPU
+  limit) — true 1:1 detail instead of a fixed target. The old `Native` tier is
+  renamed `FHD` to make clear it is a fixed 1920-long-edge preset; presets a
+  source is too small to feed are greyed out and fall back automatically.
+- **Whole-layout snapshots.** The camera button now exports the entire grid as
+  one image — a 2×2 sheet for quad, a stacked column for triple, a row for pair.
+  Shift/Alt-click still exports just the active panel. Every cell is re-rendered
+  off-screen at 1×–4× (or source-matched) with transparent, panel-gray or white
+  background, so exports are genuine high-resolution renders, not upscaled
+  screen grabs.
+- **Polish and fixes.** Brighter, correctly sized high-res exports that match the
+  live panel; the floating window is requested within the click activation
+  window; a continuous spectral CIE locus and other scope-correctness fixes.
+- **Verification.** A new `verify:capture` suite adds 23 pixel-level checks for
+  snapshot alpha, opacity, size and graticule; the full suite is now `pnpm
+  verify:all`.
+
+### 0.1.0 — 2026-11-25
+
+First complete build: waveform, parade, vectorscope, CIE 1931/1976 and histogram;
+range detection from decoder metadata with mismatch warnings; five quality tiers
+with an adaptive governor; zero-copy frame upload; pixel probe, PiP and
+fullscreen support.
 
 ## Prior art
 
