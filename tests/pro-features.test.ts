@@ -87,16 +87,16 @@ describe('multi-tier analysis precision & 10-bit P010 raw planes', () => {
     const def = analysisSize(3840, 2160, 'default');
     const high = analysisSize(3840, 2160, 'high');
     const ultra = analysisSize(3840, 2160, 'ultra');
-    const native = analysisSize(1920, 1080, 'native');
+    const fhd = analysisSize(1920, 1080, 'fhd');
     const full = analysisSize(3840, 2160, 'full');
 
     expect(low.width).toBe(320);
     expect(def.width).toBe(640);
     expect(high.width).toBeGreaterThan(def.width);
     expect(ultra.width).toBe(1280);
-    expect(native).toEqual({ width: 1920, height: 1080 });
+    expect(fhd).toEqual({ width: 1920, height: 1080 });
     expect(full).toEqual({ width: 3840, height: 2160 });
-    expect(full.width * full.height).toBeGreaterThan(native.width * native.height);
+    expect(full.width * full.height).toBeGreaterThan(fhd.width * fhd.height);
   });
 
   it('splits 10-bit P010 buffers into 16-bit luma and interleaved UV views', () => {

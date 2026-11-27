@@ -223,9 +223,9 @@ function analysisPreset(): AnalysisPreset {
  * Heavy analysis presets pay for themselves only if the sampling cadence keeps
  * up with the source, so they get a floor of 30 fps even when the governor has
  * walked the tier down. `full` belongs here: on a 4K source it is 4x the pixels
- * of `native`, and sampling it at 15 fps makes the trace visibly stale.
+ * of `fhd`, and sampling it at 15 fps makes the trace visibly stale.
  */
-const HEAVY_PRECISION: ReadonlySet<string> = new Set(['ultra', 'native', 'full']);
+const HEAVY_PRECISION: ReadonlySet<string> = new Set(['ultra', 'fhd', 'full']);
 
 function applyTier(tier: QualityTier): void {
   const d = TIER_DESCRIPTION[tier];
@@ -304,7 +304,7 @@ function refreshHud(): void {
           ? 'limited'
           : 'full';
   activeHud()?.setState(state);
-  activeHud()?.setSourceWidth(detector?.video?.videoWidth);
+  activeHud()?.setSourceSize(detector?.video?.videoWidth, detector?.video?.videoHeight);
   activeHud()?.setColorInfo(colorInfo);
   activeHud()?.setDiagnosis(
     {

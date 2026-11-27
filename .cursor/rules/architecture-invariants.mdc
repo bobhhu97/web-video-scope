@@ -16,8 +16,9 @@ Manifest V3 Chrome 扩展，在任意网页 `<video>` 上叠加示波器。Chrom
 - 新增任何 GPU pass，都不得让它随源分辨率增长。
 - 禁止"每个示波器各读全分辨率信号纹理" —— 4K 会直接掉帧，且破坏唯一的结构保证。
 - 分析尺寸由 `src/gpu/downscale.ts` 的 `analysisSize()` 按长边决定（low 320 / default 640 /
-  high 854 / ultra 1280 / native 1920 / full = 源分辨率 1:1，带 `PRESET_MAX_PIXELS` 上限），
-  竖屏自动交换。`full` 是**用户手动**选项，长边被 `MAX_ANALYSIS_EDGE`（8192）封顶，
+  high 854 / ultra 1280 / fhd 1920 / full = 源分辨率 1:1，带 `PRESET_MAX_PIXELS` 上限），
+  竖屏自动交换。固定档位在源分辨率不足时由 `presetAvailable()` 禁用，`fhd` 就是原来的
+  `native`（历史状态由 `normalizePrecision()` 迁移）。`full` 是**用户手动**选项，长边被 `MAX_ANALYSIS_EDGE`（8192）封顶，
   绝不允许自动 governor 选中它——`TIER_DESCRIPTION` 的 preset 类型刻意只含 low/default/high。
 - 每帧**只有一次** `device.queue.submit()`（`ScopeController.frame()` 里统一提交）。
 

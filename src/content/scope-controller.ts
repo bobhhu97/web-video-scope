@@ -512,7 +512,7 @@ export class ScopeController {
     ) {
       this.rawDownscaler?.destroy();
       const a = analysisSize(video.videoWidth, video.videoHeight, preset);
-      const filter: GPUFilterMode = preset === 'native' ? 'nearest' : 'linear';
+      const filter: GPUFilterMode = preset === 'fhd' ? 'nearest' : 'linear';
       this.rawDownscaler = new Downscaler(this.device, a.width, a.height, RAW_DOWNSCALE_WGSL, {
         filter,
       });
@@ -642,7 +642,7 @@ export class ScopeController {
 
     this.downscaler?.destroy();
     const a = analysisSize(video.videoWidth, video.videoHeight, preset);
-    const filter: GPUFilterMode = preset === 'native' ? 'nearest' : 'linear';
+    const filter: GPUFilterMode = preset === 'fhd' ? 'nearest' : 'linear';
     this.downscaler = new Downscaler(this.device, a.width, a.height, DOWNSCALE_WGSL, { filter });
     try {
       this.downscaler.enableExternalPath(DOWNSCALE_EXTERNAL_WGSL);

@@ -32,7 +32,8 @@ export interface I18nStrings {
   precStd: string;
   precHigh: string;
   precUltra: string;
-  precNative: string;
+  precFhd: string;
+  precTooSmall: string;
   precFull: string;
   hdrAuto: string;
 
@@ -179,7 +180,8 @@ const EN: I18nStrings = {
   precStd: 'Std 640p',
   precHigh: 'High 854p',
   precUltra: 'Ultra 1280p',
-  precNative: 'Native 1:1',
+  precFhd: 'FHD 1920p',
+  precTooSmall: 'Source is smaller than this preset',
   precFull: 'Full 1:1 (source)',
   hdrAuto: 'HDR: Auto',
 
@@ -323,7 +325,8 @@ const ZH: I18nStrings = {
   precStd: '标准 640p',
   precHigh: '高清 854p',
   precUltra: '超清 1280p',
-  precNative: '原画 1:1',
+  precFhd: 'FHD 1920p',
+  precTooSmall: '视频源分辨率低于该档位',
   precFull: '全分辨率 1:1 (源)',
   hdrAuto: 'HDR: 自动',
 

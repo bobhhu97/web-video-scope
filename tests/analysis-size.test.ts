@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { ANALYSIS_SIZES, MAX_ANALYSIS_EDGE, analysisSize } from '../src/gpu/downscale';
+import {
+  ANALYSIS_SIZES,
+  FIXED_PRESETS,
+  MAX_ANALYSIS_EDGE,
+  analysisSize,
+  largestFixedPreset,
+  normalizePrecision,
+  presetAvailable,
+  presetNeedsEdge,
+} from '../src/gpu/downscale';
 
 describe('analysisSize', () => {
   it('scales 1080p landscape to 640x360 by default', () => {
@@ -89,10 +98,74 @@ describe('analysisSize', () => {
       expect(Math.abs(s.width / s.height - 15360 / 8640)).toBeLessThan(0.01);
     });
 
-    it('is strictly larger than native', () => {
+    it('is strictly larger than fhd', () => {
       const full = analysisSize(3840, 2160, 'full');
-      const native = analysisSize(3840, 2160, 'native');
-      expect(full.width * full.height).toBeGreaterThan(native.width * native.height);
+      const fhd = analysisSize(3840, 2160, 'fhd');
+      expect(full.width * full.height).toBeGreaterThan(fhd.width * fhd.height);
     });
+  });
+});
+
+describe('preset availability', () => {
+  it('lists every fixed preset and leaves full out', () => {
+    expect([...FIXED_PRESETS]).toEqual(['low', 'default', 'high', 'ultra', 'fhd']);
+  });
+
+  it('reports the long edge each preset needs', () => {
+    expect(presetNeedsEdge('low')).toBe(ANALYSIS_SIZES.low);
+    expect(presetNeedsEdge('fhd')).toBe(1920);
+    // `full` follows the source, so nothing can make it unavailable.
+    expect(presetNeedsEdge('full')).toBe(0);
+  });
+
+  it('keeps every preset selectable while the source size is unknown', () => {
+    for (const preset of [...FIXED_PRESETS, 'full'] as const) {
+      expect(presetAvailable(preset, undefined, undefined)).toBe(true);
+      expect(presetAvailable(preset, 0, 0)).toBe(true);
+    }
+  });
+
+  it('disables a preset when the source long edge is shorter than it', () => {
+    expect(presetAvailable('fhd', 1280, 720)).toBe(false);
+    expect(presetAvailable('fhd', 1920, 1080)).toBe(true);
+    expect(presetAvailable('fhd', 3840, 2160)).toBe(true);
+    expect(presetAvailable('ultra', 1280, 720)).toBe(true);
+    expect(presetAvailable('ultra', 1024, 576)).toBe(false);
+  });
+
+  it('always allows full regardless of source size', () => {
+    expect(presetAvailable('full', 320, 180)).toBe(true);
+    expect(presetAvailable('full', 1280, 720)).toBe(true);
+  });
+
+  it('uses the long edge so portrait sources are judged correctly', () => {
+    // 1080x1920 portrait: long edge 1920 still feeds FHD.
+    expect(presetAvailable('fhd', 1080, 1920)).toBe(true);
+    expect(presetAvailable('ultra', 720, 1280)).toBe(true);
+    expect(presetAvailable('ultra', 576, 1024)).toBe(false);
+  });
+
+  it('falls back to the largest preset the source can still feed', () => {
+    expect(largestFixedPreset(3840, 2160)).toBe('fhd');
+    expect(largestFixedPreset(1920, 1080)).toBe('fhd');
+    expect(largestFixedPreset(1280, 720)).toBe('ultra');
+    expect(largestFixedPreset(1024, 576)).toBe('high');
+    expect(largestFixedPreset(640, 360)).toBe('default');
+    expect(largestFixedPreset(320, 180)).toBe('low');
+    expect(largestFixedPreset(0, 0)).toBe('fhd');
+  });
+
+  it('migrates the retired native preset name', () => {
+    expect(normalizePrecision('native')).toBe('fhd');
+    expect(normalizePrecision('fhd')).toBe('fhd');
+    expect(normalizePrecision('auto')).toBe('auto');
+    expect(normalizePrecision('full')).toBe('full');
+  });
+
+  it('falls back to auto for values we no longer understand', () => {
+    expect(normalizePrecision(undefined)).toBe('auto');
+    expect(normalizePrecision(null)).toBe('auto');
+    expect(normalizePrecision('4k')).toBe('auto');
+    expect(normalizePrecision(720)).toBe('auto');
   });
 });

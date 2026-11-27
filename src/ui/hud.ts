@@ -4,7 +4,11 @@ import { clampVectorscopePan, vectorscopeFrame, zoomVectorscopeAt } from '../cor
 import type { ColorSpaceInfo, RangeDiagnosis } from '../core/range-detector';
 import type { QualityTier } from '../core/perf-governor';
 import type { HdrMode } from '../core/scale/units';
-import type { PrecisionMode } from '../gpu/downscale';
+import {
+  largestFixedPreset,
+  presetAvailable,
+  type PrecisionMode,
+} from '../gpu/downscale';
 import type {
   HistChannelMode,
   ParadeMode,
@@ -971,13 +975,7 @@ export class Hud {
               <option value="hdr-nits">${s.fcHdrNits}</option>
             </select>
             <select id="precision" title="Analysis resolution & GPU precision">
-              <option value="auto">${s.precAuto}</option>
-              <option value="low">${s.precLow}</option>
-              <option value="default">${s.precStd}</option>
-              <option value="high">${s.precHigh}</option>
-              <option value="ultra">${s.precUltra}</option>
-              <option value="native">${s.precNative}</option>
-              <option value="full">${s.precFull}</option>
+              ${this.precisionOptionsHtml(s)}
             </select>
             <select id="hdr-mode" title="Dynamic range & scale (Auto switches to HDR Nits on PQ/HLG)">
               <option value="auto">${s.hdrAuto}</option>
@@ -1126,18 +1124,9 @@ export class Hud {
     const precSel = root.getElementById('precision') as HTMLSelectElement | null;
     if (precSel) {
       const cur = precSel.value;
-      setTrustedHtml(
-        precSel,
-        `
-        <option value="auto">${s.precAuto}</option>
-        <option value="low">${s.precLow}</option>
-        <option value="default">${s.precStd}</option>
-        <option value="high">${s.precHigh}</option>
-        <option value="ultra">${s.precUltra}</option>
-        <option value="native">${s.precNative}</option>
-        <option value="full">${s.precFull}</option>`,
-      );
+      setTrustedHtml(precSel, this.precisionOptionsHtml(s));
       precSel.value = cur;
+      this.syncPrecisionAvailability();
     }
 
     const hdrSel = root.getElementById('hdr-mode') as HTMLSelectElement | null;
@@ -2030,9 +2019,92 @@ export class Hud {
   /** Last known source video width, used by the "match source" multiplier. */
   private lastSourceWidth: number | undefined;
 
+  /** Last known source video height, used to enable or grey out the presets. */
+  private lastSourceHeight: number | undefined;
+
   setSourceWidth(width: number | undefined): void {
     this.lastSourceWidth = width && width > 0 ? width : undefined;
     if (this.settingsOpen) this.renderCaptureSizeHint();
+  }
+
+  /**
+   * Recording the source size keeps the precision menu honest: a preset that
+   * would only upscale the picture is greyed out instead of silently wasting
+   * GPU time.
+   */
+  setSourceSize(width: number | undefined, height: number | undefined): void {
+    this.lastSourceWidth = width && width > 0 ? width : undefined;
+    this.lastSourceHeight = height && height > 0 ? height : undefined;
+    this.syncPrecisionAvailability();
+    if (this.settingsOpen) this.renderCaptureSizeHint();
+  }
+
+  /**
+   * Options for the analysis-resolution menu. Fixed presets are disabled when
+   * the source is smaller than the preset's long edge; `full` always follows
+   * the source, so it stays enabled.
+   */
+  private precisionOptionsHtml(s: I18nStrings): string {
+    const rows = [
+      { value: 'auto', label: s.precAuto },
+      { value: 'low', label: s.precLow },
+      { value: 'default', label: s.precStd },
+      { value: 'high', label: s.precHigh },
+      { value: 'ultra', label: s.precUltra },
+      { value: 'fhd', label: s.precFhd },
+      { value: 'full', label: s.precFull },
+    ];
+    return rows
+      .map(
+        (row) =>
+          `<option value="${row.value}" data-precision="${row.value}">${row.label}</option>`,
+      )
+      .join('');
+  }
+
+  /** Re-evaluate which presets the current source can still feed. */
+  private syncPrecisionAvailability(): void {
+    const root = this.root;
+    if (!root) return;
+    const sel = root.getElementById('precision') as HTMLSelectElement | null;
+    if (!sel) return;
+    const title = this.i18n().precTooSmall;
+    for (const option of Array.from(sel.querySelectorAll<HTMLOptionElement>('option'))) {
+      const value = option.value as PrecisionMode;
+      // `auto` resolves at runtime, so it is never gated.
+      const ok =
+        value === 'auto' || presetAvailable(value, this.lastSourceWidth, this.lastSourceHeight);
+      option.disabled = !ok;
+      option.title = ok ? '' : title;
+    }
+    // If the saved preset became unusable, fall back to whichever tier still
+    // works instead of silently drawing an upscaled texture.
+    if (this.state.precision !== 'auto') {
+      const ok = presetAvailable(
+        this.state.precision,
+        this.lastSourceWidth,
+        this.lastSourceHeight,
+      );
+      if (!ok) {
+        const candidate = largestFixedPreset(this.lastSourceWidth, this.lastSourceHeight);
+        // A source smaller than even `low` has no fixed tier left; `auto`
+        // resolves to the cheapest tier on its own and always works.
+        const fallback: PrecisionMode = presetAvailable(
+          candidate,
+          this.lastSourceWidth,
+          this.lastSourceHeight,
+        )
+          ? candidate
+          : 'auto';
+        // Only notify when the value actually changes: this runs from
+        // syncInputs, and onStateChange loops back through refreshHud.
+        if (fallback !== this.state.precision) {
+          sel.value = fallback;
+          this.state = { ...this.state, precision: fallback };
+          this.handlers.onStateChange({ precision: fallback });
+        }
+      }
+    }
   }
 
   /**
@@ -2553,5 +2625,8 @@ export class Hud {
     } finally {
       this.syncing = false;
     }
+    // Runs outside the `syncing` guard: an unusable saved preset falls back
+    // through onStateChange, and that path must not be swallowed.
+    this.syncPrecisionAvailability();
   }
 }

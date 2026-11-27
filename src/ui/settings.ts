@@ -6,7 +6,7 @@ import type {
   TraceColorMode,
   WaveChannelMode,
 } from '../gpu/scope-renderer';
-import type { PrecisionMode } from '../gpu/downscale';
+import { normalizePrecision, type PrecisionMode } from '../gpu/downscale';
 import type { MatrixId } from '../core/color/matrices';
 import type { PrimariesId } from '../core/color/primaries';
 import type { RangeMode } from '../core/range-detector';
@@ -242,6 +242,8 @@ export async function loadSettings(): Promise<HudState> {
       ...raw,
       probeConfig: { ...DEFAULT_PROBE_CONFIG, ...(raw.probeConfig ?? {}) },
       capture: { ...DEFAULT_CAPTURE, ...(raw.capture ?? {}) },
+      // `native` was renamed to `fhd`; keep existing installs on the same tier.
+      precision: normalizePrecision(raw.precision ?? DEFAULT_STATE.precision),
       cells: raw.cells ?? {},
       panels: raw.panels ?? {},
     };

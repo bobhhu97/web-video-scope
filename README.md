@@ -126,26 +126,35 @@ here is what a 16:9 source actually gets:
 | Std | 640 px | 0.4 MP | 640×360 | default; the balance point |
 | High | 854 px | 0.4 MP | **843×474** | finer waveform detail |
 | Ultra | 1280 px | 0.95 MP | 1280×720 | near-source analysis |
-| Native | 1920 px | 2.1 MP | 1920×1080 | 1:1 with 1080p footage |
+| FHD | 1920 px | 2.1 MP | 1920×1080 | 1:1 with 1080p footage |
 | Full | source | none | 1920×1080 … 8192×4608 | 1:1 with any source |
 
 `High` is the one row where the cap binds: 854×480 would be 410 k pixels, over
 the 400 k budget, so it settles at 843×474.
 
+Every preset except `Full` is a *fixed* target, so a source that is already
+smaller than the target cannot gain anything from it — that preset would only
+upscale. Those entries are greyed out in the menu while such a source is
+playing, and an already-selected one falls back to the largest preset the source
+can still feed. `FHD` is the one that bites most often: it is available from
+1080p up, which is why it reads `FHD 1920p` rather than `Native 1:1` — it is a
+fixed 1920-long-edge tier, not a promise to stay 1:1.
+
 `Full` is the only preset with no pixel cap, so it really is 1:1 — a 4K source
 is analysed at 3840×2160, verified against the live device. It is also the only
 preset that scales with the source: everything below it produces the same
-analysis texture for a 1080p and a 4K source. That makes `Full` 4× the pixels of
-`Native` at 4K, so it is never chosen automatically — the governor's tiers top
-out at `high` — and picking it explicitly pins the frame rate to at least 30 fps
-so traces do not lag behind playback.
+analysis texture for a 1080p and a 4K source, and `Full` is never greyed out
+because it always tracks the source. That makes it 4× the pixels of `FHD` at 4K,
+so it is never chosen automatically — the governor's tiers top out at `high` —
+and picking it explicitly pins the frame rate to at least 30 fps so traces do not
+lag behind playback.
 
 The ceiling is the device, not the shader. Analysis textures are capped at
 `maxTextureDimension2D` (8192 in the WebGPU spec minimum, so 16K/32K sources
 clamp rather than fail), and the density buffer at `maxStorageBufferBindingSize`.
 Cost rises with it: measured end-to-end at 4K on this machine, one waveform at
 `Full` reports 4.3 ms and four panels 6.1 ms, against 3.2 ms for the same single
-panel at `Native`. Those figures come from the on-screen budget readout, which
+panel at `FHD`. Those figures come from the on-screen budget readout, which
 times `onSubmittedWorkDone` — an upper bound that includes compositor work, and
 the number the governor acts on. At 8K `Full`, four panels reach 21.7 ms: it
 still renders correctly, it just misses the 4 ms budget, so `Full` wants a
