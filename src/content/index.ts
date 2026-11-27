@@ -506,6 +506,9 @@ function buildController(): void {
     get status() {
       return presentationStatus;
     },
+    get floatingAttempt() {
+      return lastFloatingAttempt;
+    },
     get reattachCount() {
       return reattachCount;
     },
@@ -532,17 +535,152 @@ function buildController(): void {
 
 let presentationStatus = 'idle';
 let enablePromise: Promise<void> | null = null;
+let floatingRequest: Promise<FloatingWindow> | null = null;
 
-function enable(): Promise<void> {
+function floatingWindowOptions(): {
+  width: number;
+  height: number;
+  onClosed: () => void;
+} {
+  return {
+    width: Math.min(920, Math.round(window.screen.availWidth * 0.52)),
+    height: Math.min(700, Math.round(window.screen.availHeight * 0.74)),
+    onClosed: () => {
+      floating = null;
+      floatingHud?.unmount();
+      floatingHud = null;
+      if (enabled && !hud) {
+        void disable();
+      } else {
+        controller?.setTargets(activeHud()?.panelCanvases() ?? []);
+        presentationStatus = 'returned';
+      }
+    },
+  };
+}
+
+/**
+ * What the last window request saw, for bug reports.
+ *
+ * `activation` is sampled on the same task as `requestWindow()`, so a report
+ * showing `isActive: false` means the click's activation really had lapsed —
+ * that is the signature of the first-click bug, and it should stay impossible.
+ */
+let lastFloatingAttempt: {
+  activation: boolean;
+  hasBeenActive: boolean;
+  outcome: 'pending' | 'opened' | 'denied' | 'failed';
+  error?: string;
+} | null = null;
+
+/**
+ * Ask for the Document PiP window right now, before anything is awaited.
+ *
+ * Chrome only accepts `requestWindow()` while the click that started this chain
+ * still counts as transient user activation, and it gives that window no slack.
+ * The very first toolbar click is the worst case: the service worker still has
+ * to inject content.js and retry the message, and `enable()` used to await two
+ * storage round-trips before asking for the window. By then activation had
+ * lapsed, `requestWindow()` threw `NotAllowedError`, and the catch branch left
+ * the panel in the page — so the window only ever appeared on the second click.
+ *
+ * Calling this synchronously (it reaches `requestWindow()` before its first
+ * await) keeps the request inside the activation window; the slow start-up work
+ * then happens in a window we already own.
+ */
+function startFloatingRequest(): Promise<FloatingWindow> | null {
+  if (!pipSupported()) return null;
+  if (floating?.isOpen()) return null;
+  if (floatingRequest) return floatingRequest;
+
+  const activation = typeof navigator !== 'undefined' && 'userActivation' in navigator
+    ? navigator.userActivation
+    : undefined;
+  const attempt = {
+    activation: !!activation?.isActive,
+    hasBeenActive: !!activation?.hasBeenActive,
+    outcome: 'pending' as const,
+  };
+  lastFloatingAttempt = attempt;
+
+  const request = openFloatingWindow(floatingWindowOptions());
+  floatingRequest = request;
+  void request
+    .then(() => {
+      lastFloatingAttempt = { ...attempt, outcome: 'opened' };
+    })
+    .catch((e: unknown) => {
+      const name = e instanceof DOMException ? e.name : 'Error';
+      lastFloatingAttempt = {
+        ...attempt,
+        outcome: name === 'NotAllowedError' ? 'denied' : 'failed',
+        error: name,
+      };
+    })
+    .finally(() => {
+      if (floatingRequest === request) floatingRequest = null;
+    });
+  return request;
+}
+
+/** Move the HUD into an already opened window and rebind the controller. */
+function adoptFloatingWindow(win: FloatingWindow): void {
+  floating = win;
+
+  guardian?.stop();
+  guardian = null;
+  hud?.unmount();
+  hud = null;
+
+  floatingHud = new Hud(
+    { ...state, hostPosition: { left: 0, top: 0, right: 0 } },
+    buildHandlers(),
+  );
+  floatingHud.mount(win.document, { fill: true });
+
+  controller?.setTargets(floatingHud.panelCanvases());
+  refreshHud();
+  controller?.resize();
+  requestRedraw();
+
+  presentationStatus = 'floating';
+}
+
+function enable(options: { float?: boolean } = {}): Promise<void> {
   if (enablePromise) return enablePromise;
   if (enabled) return Promise.resolve();
   enabled = true;
 
+  // Keep this before every await: see startFloatingRequest() for why.
+  const windowRequest = options.float ? startFloatingRequest() : null;
+
   enablePromise = (async () => {
     state = { ...state, visible: true };
-    hud = buildHud();
-    hud.mount();
-    presentationStatus = 'in-page';
+    presentationStatus = 'starting';
+
+    let win: FloatingWindow | null = null;
+    if (windowRequest) {
+      try {
+        win = await windowRequest;
+      } catch {
+        win = null; // Activation lapsed after all: fall back to the in-page panel.
+      }
+    }
+
+    // The window can arrive after the user already closed the panel again.
+    // Adopting it then would leave a live window with a dead HUD, so shut it.
+    if (!enabled) {
+      win?.close();
+      return;
+    }
+
+    if (win) {
+      adoptFloatingWindow(win);
+    } else {
+      hud = buildHud();
+      hud.mount();
+      presentationStatus = 'in-page';
+    }
 
     try {
       await chrome.storage.session.set({ scopesOn: true });
@@ -552,7 +690,7 @@ function enable(): Promise<void> {
 
     try {
       state = { ...(await loadSettings()), visible: true, layout: state.layout };
-      hud.setState(state);
+      activeHud()?.setState(state);
     } catch {
       // Keep defaults
     }
@@ -751,18 +889,22 @@ function finishEnable(): void {
   }
 
   try {
-    unfollowFullscreen = followFullscreen(mounted, () => {
-      controller?.resize();
-      requestRedraw();
-    });
+    // The Document PiP host lives in another document; the in-page fullscreen
+    // and SPA-reparent guards would drag it back into this page.
+    if (!floatingHud) {
+      unfollowFullscreen = followFullscreen(mounted, () => {
+        controller?.resize();
+        requestRedraw();
+      });
 
-    guardian = keepAttached(
-      mounted,
-      overlayFullscreenParent,
-      (n) => {
-        reattachCount = n;
-      },
-    );
+      guardian = keepAttached(
+        mounted,
+        overlayFullscreenParent,
+        (n) => {
+          reattachCount = n;
+        },
+      );
+    }
 
     buildController();
 
@@ -879,11 +1021,11 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
 
 function ensureVisible(): void {
   if (!enabled) {
-    void enable().then(() => detachToFloatingWindow());
+    void enable({ float: true });
     return;
   }
   if (enablePromise) {
-    void enablePromise.then(() => detachToFloatingWindow());
+    void enablePromise;
     return;
   }
   if (floating?.isOpen()) {
@@ -892,7 +1034,7 @@ function ensureVisible(): void {
   }
   const host = document.getElementById(HOST_ID);
   if (!host) {
-    void disable().then(() => enable().then(() => detachToFloatingWindow()));
+    void disable().then(() => enable({ float: true }));
     return;
   }
   void detachToFloatingWindow();
@@ -909,44 +1051,26 @@ async function detachToFloatingWindow(): Promise<void> {
     return;
   }
 
+  // Ask for the window before the first await — this runs inside the click's
+  // task, which is the only place Chrome honours the activation.
+  const request = startFloatingRequest();
+  if (!request) {
+    guardian?.reattach();
+    return;
+  }
+
   try {
-    floating = await openFloatingWindow({
-      width: Math.min(920, Math.round(window.screen.availWidth * 0.52)),
-      height: Math.min(700, Math.round(window.screen.availHeight * 0.74)),
-      onClosed: () => {
-        floating = null;
-        floatingHud?.unmount();
-        floatingHud = null;
-        if (enabled && !hud) {
-          void disable();
-        } else {
-          controller?.setTargets(activeHud()?.panelCanvases() ?? []);
-          presentationStatus = 'returned';
-        }
-      },
-    });
-
-    guardian?.stop();
-    guardian = null;
-    hud?.unmount();
-    hud = null;
-
-    floatingHud = new Hud(
-      { ...state, hostPosition: { left: 0, top: 0, right: 0 } },
-      buildHandlers(),
-    );
-    floatingHud.mount(floating.document, { fill: true });
-
+    const win = await request;
+    adoptFloatingWindow(win);
     if (!controller) buildController();
-    controller?.setTargets(floatingHud.panelCanvases());
+    controller?.setTargets(floatingHud?.panelCanvases() ?? []);
     refreshHud();
     controller?.resize();
     requestRedraw();
-
-    presentationStatus = 'floating';
   } catch (e) {
     if (e instanceof DOMException && e.name === 'NotAllowedError') {
-      // Browser requires an in-page gesture for Document PiP; keep in-page HUD cleanly.
+      // Activation lapsed anyway (e.g. a synthetic click without a gesture);
+      // keep the in-page HUD rather than showing a dead window.
       presentationStatus = 'in-page';
       guardian?.reattach();
       return;

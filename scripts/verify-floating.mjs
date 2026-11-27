@@ -47,7 +47,8 @@ const browser = await puppeteer.launch({
   headless: false, // Document PiP needs a real window
   userDataDir: mkdtempSync(join(tmpdir(), 'float-')),
   args: ['--enable-unsafe-webgpu', '--use-angle=metal', '--no-first-run',
-    '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required'],
+    '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required',
+    '--no-sandbox'],
 });
 
 try {
@@ -104,6 +105,26 @@ try {
   }
 
   check('a separate window is created', pipPage !== null);
+
+  // Regression: the very first activation must already be floating. It used to
+  // fall back to the in-page panel because `enable()` awaited two storage
+  // round-trips before asking for the window and the user activation had
+  // lapsed by then, so the window only appeared on the second click.
+  const firstActivation = await page.evaluate(() => ({
+    hostInPage: !!document.getElementById('video-scopes-host'),
+    status: window.__scopeDebug?.status ?? null,
+    attempt: window.__scopeDebug?.floatingAttempt ?? null,
+  }));
+  check(
+    'the first activation goes straight to the floating window',
+    pipPage !== null && !firstActivation.hostInPage && firstActivation.status === 'floating',
+    JSON.stringify(firstActivation),
+  );
+  check(
+    'the window request still held user activation',
+    firstActivation.attempt?.outcome === 'opened' && firstActivation.attempt?.activation === true,
+    JSON.stringify(firstActivation.attempt),
+  );
 
   if (pipPage) {
     const inside = await pipPage.evaluate(() => {
