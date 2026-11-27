@@ -29,6 +29,7 @@ import {
   captureFileName,
   captureSheetFileName,
   effectiveBackground,
+  exportDensityGain,
   formatInfo,
   graticuleThemeFor,
   planCapture,
@@ -51,6 +52,12 @@ export interface CaptureRequest {
   settings: CaptureSettings;
   /** Source video width, used by the `'match'` multiplier. */
   sourceWidth?: number;
+  /**
+   * Live panel's device-pixel ratio. Exports rendered above it are dimmed by
+   * the phosphor model, so the renderer gets a compensating gain (see
+   * `exportDensityGain`). Omit to leave the gain untouched.
+   */
+  sourceDpr?: number;
 }
 
 export interface CaptureResult {
@@ -115,6 +122,8 @@ export interface CaptureSheetRequest {
     cssHeight: number;
   }[];
   sourceWidth?: number;
+  /** Live panel device-pixel ratio, see `CaptureRequest.sourceDpr`. */
+  sourceDpr?: number;
   /** Gutter between cells, in CSS pixels of one cell. */
   gap?: number;
 }
@@ -228,6 +237,14 @@ export async function renderSheetImage(req: CaptureSheetRequest): Promise<Captur
     gap,
   });
 
+  // Exports rendered above the panel's pixel density spread the trace over
+  // more density rows, so lift the phosphor gain to keep the sheet as bright
+  // as the panel the user is looking at.
+  const boost = exportDensityGain(plan.scale, req.sourceDpr);
+  if (boost !== 1) {
+    for (const options of baseOptions) options.gain = (options.gain ?? 0.9) * boost;
+  }
+
   const { canvas: out, ctx } = canvas2d(plan.width, plan.height);
   if (background === 'panel') {
     // Match the live layout: the grid background shows through the gutters,
@@ -303,6 +320,9 @@ export async function renderPanelImage(req: CaptureRequest): Promise<CaptureResu
     maxEdge: req.device.limits.maxTextureDimension2D,
     maxDensityBytes: req.device.limits.maxStorageBufferBindingSize,
   });
+
+  const boost = exportDensityGain(plan.scale, req.sourceDpr);
+  if (boost !== 1) baseOptions.gain = (baseOptions.gain ?? 0.9) * boost;
 
   const offscreen = new OffscreenCanvas(plan.width, plan.height);
   const context = offscreen.getContext('webgpu');

@@ -292,6 +292,7 @@ export class ScopeController {
       gamuts: this.gamuts(),
       settings,
       sourceWidth: this.lastSampledVideo?.videoWidth,
+      sourceDpr: canvasDpr(target.gpu),
     });
   }
 
@@ -336,6 +337,7 @@ export class ScopeController {
       grid,
       panels,
       sourceWidth: this.lastSampledVideo?.videoWidth,
+      sourceDpr: this.targets[0] ? canvasDpr(this.targets[0].gpu) : undefined,
       gap: this.captureGap,
     });
   }

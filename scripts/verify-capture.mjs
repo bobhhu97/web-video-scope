@@ -316,8 +316,8 @@ try {
     gutter.exp[0] === gutter.live[0] && gutter.exp[1] === gutter.live[1] && gutter.exp[2] === gutter.live[2],
     `live rgb(${gutter.live.slice(0, 3)}) vs export rgb(${gutter.exp})`);
 
-  // ---- 8. Triple exports as one wide row --------------------------------
-  // On screen triple stacks vertically; the export deliberately goes wide.
+  // ---- 8. Triple exports as a stacked column -----------------------------
+  // Triple is a 1x3 column on screen and the sheet follows it.
   // Switch layouts through the layout buttons so this runs the same path a
   // user would.
   await page.evaluate(async () => {
@@ -332,32 +332,35 @@ try {
     const bmp = await createImageBitmap(r.blob);
     const width = bmp.width;
     const height = bmp.height;
-    // Sample a horizontal band across the vertical middle: three cells in a
-    // row means content appears at left, centre and right.
+    // Sample one vertical slice down the middle of each third: a stacked column
+    // of three cells puts content in three separate horizontal bands.
     const c2d = document.createElement('canvas');
     c2d.width = width;
     c2d.height = height;
     const ctx = c2d.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(bmp, 0, 0);
-    const band = ctx.getImageData(0, Math.floor(height / 2), width, 1).data;
+    const slice = ctx.getImageData(Math.floor(width / 2), 0, 1, height).data;
     const ink = (from, to) => {
       let n = 0;
-      for (let x = from; x < to; x++) {
-        const i = x * 4;
-        if (band[i] < 235 || band[i + 1] < 235 || band[i + 2] < 235) n++;
+      for (let y = from; y < to; y++) {
+        const i = y * 4;
+        if (slice[i] < 235 || slice[i + 1] < 235 || slice[i + 2] < 235) n++;
       }
       return n;
     };
-    const third = Math.floor(width / 3);
-    const cols = [ink(0, third), ink(third, third * 2), ink(third * 2, width)];
+    const third = Math.floor(height / 3);
+    const rows = [ink(0, third), ink(third, third * 2), ink(third * 2, height)];
     bmp.close();
-    return { width, height, cols, cells: document.querySelector('#video-scopes-host').shadowRoot.querySelectorAll('.cell').length };
+    return { width, height, rows, cells: document.querySelector('#video-scopes-host').shadowRoot.querySelectorAll('.cell').length };
   });
   check('triple layout exports three cells', triple.cells === 3, `${triple.cells} cells`);
-  check('triple sheet is one wide row, not a vertical stack',
-    triple.width > triple.height, `${triple.width}x${triple.height}`);
-  check('triple sheet has content in all three columns',
-    triple.cols.every((n) => n > 0), triple.cols.join(','));
+  // A 1x3 stack of wide, short cells is still wider than tall once the cells
+  // are the full panel width; the tell is the aspect. Side by side three cells
+  // would be ~9x flatter (h/w under 0.1), stacking brings it to roughly 0.5.
+  check('triple sheet is stacked, not one flat row',
+    triple.height / triple.width > 0.3, `${triple.width}x${triple.height} h/w ${(triple.height / triple.width).toFixed(2)}`);
+  check('triple sheet has content in all three rows',
+    triple.rows.every((n) => n > 0), triple.rows.join(','));
 
   check('no uncaught errors or WebGPU validation errors', errors.length === 0, errors.join(' | ') || 'clean');
 } finally {

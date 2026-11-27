@@ -13,9 +13,8 @@ import type { ScopeMode } from '../../gpu/scope-renderer';
  * Grid shape an export lays the cells out in, as `columns × rows`.
  *
  * Deliberately not the HUD's `Layout` union: `src/core` must not depend on
- * `src/ui`, and the export grid is not always the on-screen one. Three panels
- * are stacked vertically on screen but exported side by side, which is what
- * `triple` means here.
+ * `src/ui`. Every sheet mirrors the arrangement the user sees on screen, so a
+ * three-panel layout exports as a 1×3 vertical stack.
  */
 export type CaptureGrid = 'single' | 'pair' | 'triple' | 'grid';
 
@@ -184,6 +183,29 @@ export function graticuleThemeFor(background: CaptureBackground): 'dark' | 'ligh
   return background === 'panel' ? 'dark' : 'light';
 }
 
+/**
+ * Brightness compensation for exports rendered above the panel's own pixel
+ * density.
+ *
+ * The scope's phosphor model treats every density cell as one phosphor dot: a
+ * sample writes into one or two adjacent rows regardless of how tall the plot
+ * is. Rendering the same signal into a taller raster therefore spreads the
+ * trace over more cells and each cell receives less energy, so a 4× export
+ * reads visibly dimmer than the panel it came from — where the panel at scale
+ * 2× on a 2×-dpr display is pixel-identical to a 2× export.
+ *
+ * Exports only need to look like the panel, so we lift the phosphor gain by the
+ * ratio between the export multiplier and the panel's device-pixel ratio.
+ * `sourceDpr` is the live panel's `devicePixelRatio`; when it is unknown we
+ * assume the export already matches and apply no compensation.
+ */
+export function exportDensityGain(scale: number, sourceDpr: number | undefined): number {
+  if (!sourceDpr || !Number.isFinite(sourceDpr) || sourceDpr <= 0) return 1;
+  const ratio = scale / sourceDpr;
+  if (!Number.isFinite(ratio) || ratio <= 1.02) return 1;
+  return Math.min(2.2, Math.pow(ratio, 0.6));
+}
+
 /** File extension, and MIME type, for a format. */
 export function formatInfo(format: CaptureFormat): { mime: string; ext: string; quality?: number } {
   switch (format) {
@@ -223,8 +245,8 @@ export function captureGridShape(grid: CaptureGrid): { cols: number; rows: numbe
     case 'pair':
       return { cols: 2, rows: 1, cells: 2 };
     case 'triple':
-      // Stacked 1×3 on screen, but a wide strip reads far better as an export.
-      return { cols: 3, rows: 1, cells: 3 };
+      // Matches the on-screen 1×3 stack so the sheet reads like the panel.
+      return { cols: 1, rows: 3, cells: 3 };
     case 'grid':
       return { cols: 2, rows: 2, cells: 4 };
     default:

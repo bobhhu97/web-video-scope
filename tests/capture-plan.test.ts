@@ -10,6 +10,7 @@ import {
   captureSheetFileName,
   describeSize,
   effectiveBackground,
+  exportDensityGain,
   formatInfo,
   graticuleThemeFor,
   planCapture,
@@ -140,11 +141,38 @@ describe('capture format helpers', () => {
   });
 });
 
+describe('exportDensityGain', () => {
+  it('leaves exports at or below the panel density untouched', () => {
+    expect(exportDensityGain(1, 1)).toBe(1);
+    expect(exportDensityGain(2, 2)).toBe(1);
+    expect(exportDensityGain(1, 2)).toBe(1);
+    expect(exportDensityGain(4, 4)).toBe(1);
+  });
+
+  it('lifts the gain when the export outruns the panel dpr', () => {
+    const twice = exportDensityGain(4, 2);
+    const thrice = exportDensityGain(6, 2);
+    expect(twice).toBeGreaterThan(1);
+    expect(thrice).toBeGreaterThan(twice);
+    expect(exportDensityGain(4, 1)).toBeGreaterThan(exportDensityGain(4, 2));
+  });
+
+  it('stays bounded so the trace never blows out', () => {
+    expect(exportDensityGain(64, 1)).toBeLessThanOrEqual(2.2);
+  });
+
+  it('assumes no compensation when the panel dpr is unknown', () => {
+    expect(exportDensityGain(4, undefined)).toBe(1);
+    expect(exportDensityGain(4, 0)).toBe(1);
+    expect(exportDensityGain(4, Number.NaN)).toBe(1);
+  });
+});
+
 describe('captureGridShape', () => {
-  it('lays triple out as one horizontal row', () => {
-    // On screen triple stacks vertically; the export deliberately goes wide so
-    // three scopes read side by side in a document.
-    expect(captureGridShape('triple')).toEqual({ cols: 3, rows: 1, cells: 3 });
+  it('keeps triple stacked, matching the on-screen arrangement', () => {
+    // Triple is a 1x3 column on screen, and the export follows it so the sheet
+    // reads like the panel the user was looking at.
+    expect(captureGridShape('triple')).toEqual({ cols: 1, rows: 3, cells: 3 });
   });
 
   it('matches the on-screen arrangement for the other layouts', () => {
