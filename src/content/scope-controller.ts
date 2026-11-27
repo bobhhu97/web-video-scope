@@ -29,6 +29,8 @@ import {
   splitP010,
 } from '../gpu/raw-planes';
 import { ExternalVideoSource } from '../gpu/external-source';
+import { renderPanelImage, renderSheetImage, type CaptureResult } from './scope-exporter';
+import type { CaptureGrid, CaptureSettings } from '../core/scopes/capture-plan';
 import DOWNSCALE_WGSL from '../gpu/shaders/downscale.wgsl?raw';
 import DOWNSCALE_EXTERNAL_WGSL from '../gpu/shaders/downscale-external.wgsl?raw';
 import RAW_DOWNSCALE_WGSL from '../gpu/shaders/raw-downscale.wgsl?raw';
@@ -135,6 +137,8 @@ export class ScopeController {
   private p010UvScratch: Uint16Array | null = null;
   private rawDownscaler: Downscaler | null = null;
   private rawPending = false;
+  /** Gutter between sheet cells, in CSS pixels. Mirrors the on-screen grid gap. */
+  captureGap = 3;
   onRawError: ((message: string) => void) | null = null;
 
   constructor(
@@ -245,6 +249,97 @@ export class ScopeController {
 
   get falseColorDiagnostics(): FalseColorDiagnostics {
     return this.falseColor.diagnostics;
+  }
+
+  /**
+   * Read-only snapshot of the options a slot is currently rendering with.
+   * Exposed through `__scopeDebug.options(slot)` so a browser probe can compare
+   * the live renderer against what an export produces.
+   */
+  optionSnapshot(slot: number): ScopeOptions | null {
+    const target = this.targets.find((t) => t.slot === slot);
+    const renderer = this.renderers.get(slot);
+    if (!target) return null;
+    return renderer ? { ...renderer.options } : this.optionsFor(slot, target.mode);
+  }
+
+  /**
+   * Capture one live panel as an image.
+   *
+   * Re-renders the analysis texture the panel is currently showing (rather
+   * than re-uploading the video) so the export matches what the user sees, at
+   * a larger multiplier and with an export-specific ink palette.
+   */
+  async capturePanel(slot: number, settings: CaptureSettings): Promise<CaptureResult> {
+    if (this.destroyed) throw new Error('capture: controller destroyed');
+    const target = this.targets.find((t) => t.slot === slot);
+    if (!target) throw new Error('capture: panel not found');
+    const renderer = this.renderers.get(slot);
+    const analysis = this.signalMode === 'raw' ? this.rawDownscaler : this.downscaler;
+    if (!analysis) throw new Error('capture: no analysis texture yet');
+
+    const cssWidth = Math.max(1, Math.round(target.gpu.clientWidth));
+    const cssHeight = Math.max(1, Math.round(target.gpu.clientHeight));
+    const options = renderer ? renderer.options : this.optionsFor(slot, target.mode);
+
+    return renderPanelImage({
+      device: await getDevice(),
+      analysis,
+      options,
+      mode: target.mode,
+      cssWidth,
+      cssHeight,
+      gamuts: this.gamuts(),
+      settings,
+      sourceWidth: this.lastSampledVideo?.videoWidth,
+      sourceDpr: canvasDpr(target.gpu),
+    });
+  }
+
+  /**
+   * Capture every live panel into one sheet, laid out like the on-screen grid.
+   *
+   * Cells keep their own renderer options, so each tile reproduces what that
+   * panel currently shows (mode, channel, zoom, pan, gain, gamma). The layout
+   * is taken from the caller because the controller only knows slots, not the
+   * arrangement the HUD is using.
+   */
+  async captureLayout(
+    grid: CaptureGrid,
+    settings: CaptureSettings,
+  ): Promise<CaptureResult> {
+    if (this.destroyed) throw new Error('capture: controller destroyed');
+    const analysis = this.signalMode === 'raw' ? this.rawDownscaler : this.downscaler;
+    if (!analysis) throw new Error('capture: no analysis texture yet');
+
+    const panels = this.targets
+      .map((target) => {
+        const renderer = this.renderers.get(target.slot);
+        return {
+          slot: target.slot,
+          mode: target.mode,
+          options: renderer ? renderer.options : this.optionsFor(target.slot, target.mode),
+          cssWidth: Math.max(1, Math.round(target.gpu.clientWidth)),
+          cssHeight: Math.max(1, Math.round(target.gpu.clientHeight)),
+        };
+      })
+      // Reading order: the sheet tiles row-major, so slot order has to match
+      // the on-screen arrangement rather than map insertion order.
+      .sort((a, b) => a.slot - b.slot);
+
+    if (panels.length === 0) throw new Error('capture: no panels mounted');
+
+    return renderSheetImage({
+      device: await getDevice(),
+      analysis,
+      gamuts: this.gamuts(),
+      settings,
+      grid,
+      panels,
+      sourceWidth: this.lastSampledVideo?.videoWidth,
+      sourceDpr: this.targets[0] ? canvasDpr(this.targets[0].gpu) : undefined,
+      gap: this.captureGap,
+    });
   }
 
   async frame(video: HTMLVideoElement, force = false): Promise<void> {
@@ -431,7 +526,7 @@ export class ScopeController {
     ) {
       this.rawDownscaler?.destroy();
       const a = analysisSize(video.videoWidth, video.videoHeight, preset);
-      const filter: GPUFilterMode = preset === 'native' ? 'nearest' : 'linear';
+      const filter: GPUFilterMode = preset === 'fhd' ? 'nearest' : 'linear';
       this.rawDownscaler = new Downscaler(this.device, a.width, a.height, RAW_DOWNSCALE_WGSL, {
         filter,
       });
@@ -561,7 +656,7 @@ export class ScopeController {
 
     this.downscaler?.destroy();
     const a = analysisSize(video.videoWidth, video.videoHeight, preset);
-    const filter: GPUFilterMode = preset === 'native' ? 'nearest' : 'linear';
+    const filter: GPUFilterMode = preset === 'fhd' ? 'nearest' : 'linear';
     this.downscaler = new Downscaler(this.device, a.width, a.height, DOWNSCALE_WGSL, { filter });
     try {
       this.downscaler.enableExternalPath(DOWNSCALE_EXTERNAL_WGSL);

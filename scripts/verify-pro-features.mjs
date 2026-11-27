@@ -5,7 +5,7 @@
  *     True-Colorize YRGB Waveform + YUV Parade + Histogram in 4-up grid)
  *  2. Per-cell gear popover (`⚙`) with scope-specific professional controls
  *  3. Direct mouse wheel cursor-anchored zoom, drag pan, and double-click reset
- *  4. Multi-tier precision selector (`low` / `default` / `high` / `ultra` / `native`)
+ *  4. Multi-tier precision selector (`low` / `default` / `high` / `ultra` / `fhd`)
  *  5. BT.2020 + HDR PQ (ST.2084) / HLG auto-scale, HDR reference ticks (`203 nits`),
  *     Dual-Nit zone coloring (`100 nits` / `1000 nits`), and `Max / >1000n%` telemetry
  *  6. Live WebGPU Video False Color overlay directly on top of the `<video>` element
@@ -383,7 +383,7 @@ try {
   // 3. Multi-tier precision selector (`low` -> `ultra`)
   // -------------------------------------------------------------------------
   const precReadouts = {};
-  for (const preset of ['low', 'ultra', 'auto']) {
+  for (const preset of ['low', 'high', 'auto']) {
     await page.evaluate((val) => {
       const root = document.getElementById('video-scopes-host').shadowRoot;
       const sel = root.querySelector('#precision');
@@ -396,9 +396,57 @@ try {
     );
   }
   check(
-    'precision selector dynamically switches GPU analysis resolution (180p vs 540p)',
-    precReadouts.low.includes('180p') && precReadouts.ultra.includes('540p'),
-    `low="${precReadouts.low}" | ultra="${precReadouts.ultra}"`,
+    'precision selector dynamically switches GPU analysis resolution (180p vs 474p)',
+    precReadouts.low.includes('180p') && precReadouts.high.includes('474p'),
+    `low="${precReadouts.low}" | high="${precReadouts.high}"`,
+  );
+
+  // This fixture feeds a 960x540 source, so `fhd` (1920) and `ultra` (1280)
+  // must be greyed out while `high` (854) still fits and `full` (which follows
+  // the source) stays selectable whatever the size is.
+  const gating = await page.evaluate(() => {
+    const root = document.getElementById('video-scopes-host').shadowRoot;
+    const sel = root.querySelector('#precision');
+    const read = (v) => {
+      const o = sel.querySelector(`option[value="${v}"]`);
+      return o ? { disabled: o.disabled, title: o.title } : null;
+    };
+    return {
+      fhd: read('fhd'),
+      ultra: read('ultra'),
+      high: read('high'),
+      full: read('full'),
+      auto: read('auto'),
+    };
+  });
+  check(
+    'presets above the source resolution are disabled (540p source greys out FHD and Ultra)',
+    gating.fhd?.disabled === true &&
+      gating.fhd.title.length > 0 &&
+      gating.ultra?.disabled === true &&
+      gating.high?.disabled === false &&
+      gating.full?.disabled === false &&
+      gating.auto?.disabled === false,
+    `fhd=${JSON.stringify(gating.fhd)} | ultra=${JSON.stringify(gating.ultra)} | high=${JSON.stringify(gating.high)} | full=${JSON.stringify(gating.full)}`,
+  );
+
+  // Asking for a preset the source cannot feed must fall back, never upscale.
+  const fellBack = await page.evaluate(async () => {
+    const root = document.getElementById('video-scopes-host').shadowRoot;
+    const sel = root.querySelector('#precision');
+    sel.value = 'fhd';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 500));
+    return {
+      value: sel.value,
+      precision: window.__scopeDebug?.precision,
+      dims: window.__scopeDebug?.dims,
+    };
+  });
+  check(
+    'an unusable preset falls back to the largest one the source supports',
+    fellBack.value !== 'fhd' && fellBack.precision !== 'fhd',
+    `selector=${fellBack.value} precision=${fellBack.precision} dims=${JSON.stringify(fellBack.dims)}`,
   );
 
   // -------------------------------------------------------------------------

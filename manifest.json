@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Web Video Scope",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Waveform, vectorscope and CIE diagram overlay for any video on the web.",
   "minimum_chrome_version": "121",
   "permissions": [

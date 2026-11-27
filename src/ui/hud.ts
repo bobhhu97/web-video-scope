@@ -4,14 +4,19 @@ import { clampVectorscopePan, vectorscopeFrame, zoomVectorscopeAt } from '../cor
 import type { ColorSpaceInfo, RangeDiagnosis } from '../core/range-detector';
 import type { QualityTier } from '../core/perf-governor';
 import type { HdrMode } from '../core/scale/units';
-import type { PrecisionMode } from '../gpu/downscale';
-import type {
-  HistChannelMode,
-  ParadeMode,
-  ScopeMode,
-  ToneFilter,
-  TraceColorMode,
-  WaveChannelMode,
+import {
+  largestFixedPreset,
+  presetAvailable,
+  type PrecisionMode,
+} from '../gpu/downscale';
+import {
+  planesForOptions,
+  type HistChannelMode,
+  type ParadeMode,
+  type ScopeMode,
+  type ToneFilter,
+  type TraceColorMode,
+  type WaveChannelMode,
 } from '../gpu/scope-renderer';
 import { WAVE_PAD } from './graticule';
 import { t, type I18nStrings, type Locale } from './i18n';
@@ -30,6 +35,12 @@ import {
   type Layout,
   type ProbeDisplayConfig,
 } from './settings';
+import {
+  DEFAULT_CAPTURE,
+  effectiveBackground,
+  planCaptureLayout,
+  type CaptureSettings,
+} from '../core/scopes/capture-plan';
 
 export interface PanelTargets {
   slot: number;
@@ -84,6 +95,11 @@ export interface HudHandlers {
   onClose(): void;
   onOpenPip(): void;
   onToggleLock(): void;
+  /**
+   * Save a snapshot. With a slot, only that panel; without, the whole layout
+   * exactly as it is currently arranged on screen.
+   */
+  onCapture?(slot?: number): void;
 }
 
 const HOST_ID = 'video-scopes-host';
@@ -345,6 +361,8 @@ const STYLE = `
     display: grid; grid-template-columns: 94px 1fr; gap: 6px; align-items: center;
   }
   .set-field > span { color: #95aab9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .set-hint { color: #6f8291; font-size: 10px; line-height: 1.45; }
+  .set-hint:empty { display: none; }
   .seg-btns { display: inline-flex; gap: 3px; }
   .check-grid {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
@@ -874,6 +892,40 @@ export class Hud {
               </div>
             </div>
           </div>
+          <div class="sec">
+            <div class="sec-title">${s.secCapture}</div>
+            <div class="set-grid">
+              <div class="set-field">
+                <span>${s.lblCaptureFormat}</span>
+                <select id="set-capture-format">
+                  <option value="png">PNG</option>
+                  <option value="jpeg">JPEG</option>
+                  <option value="webp">WebP</option>
+                </select>
+              </div>
+              <div class="set-field">
+                <span>${s.lblCaptureScale}</span>
+                <select id="set-capture-scale">
+                  <option value="1">1×</option>
+                  <option value="2">2×</option>
+                  <option value="3">3×</option>
+                  <option value="4">4×</option>
+                  <option value="match">${s.captureScaleMatch}</option>
+                </select>
+              </div>
+              <div class="set-field">
+                <span>${s.lblCaptureBackground}</span>
+                <select id="set-capture-background">
+                  <option value="transparent">${s.bgTransparent}</option>
+                  <option value="panel">${s.bgPanel}</option>
+                  <option value="white">${s.bgWhite}</option>
+                </select>
+              </div>
+            </div>
+            <div class="set-hint" id="capture-size-hint"></div>
+            <button id="capture-now-btn" type="button" class="active">${s.btnCapture}</button>
+            <div class="set-hint">${s.captureAccuracyHint}</div>
+          </div>
         </div>
         <div class="settings-foot">
           <button id="reset-all-btn" type="button" class="btn-danger">${s.btnResetAll}</button>
@@ -899,6 +951,7 @@ export class Hud {
           <span class="spacer"></span>
           <span class="badge mono" id="perf" title="Click to toggle governor lock">–</span>
           ${showPip ? `<button id="pip-btn" type="button" class="icon-btn" title="${s.pipTitle}">⧉</button>` : ''}
+          <button id="capture-btn" type="button" class="icon-btn" title="${s.btnCapture}">📷</button>
           <button id="lang-btn" type="button" class="icon-btn" title="Switch Language / 切换中英文">${langToggleText}</button>
           <button id="settings-btn" type="button" class="icon-btn" aria-pressed="false" title="${s.settingsTitle}">⚙</button>
           <button id="close" type="button" class="icon-btn" title="${s.closeTitle}">✕</button>
@@ -923,12 +976,7 @@ export class Hud {
               <option value="hdr-nits">${s.fcHdrNits}</option>
             </select>
             <select id="precision" title="Analysis resolution & GPU precision">
-              <option value="auto">${s.precAuto}</option>
-              <option value="low">${s.precLow}</option>
-              <option value="default">${s.precStd}</option>
-              <option value="high">${s.precHigh}</option>
-              <option value="ultra">${s.precUltra}</option>
-              <option value="native">${s.precNative}</option>
+              ${this.precisionOptionsHtml(s)}
             </select>
             <select id="hdr-mode" title="Dynamic range & scale (Auto switches to HDR Nits on PQ/HLG)">
               <option value="auto">${s.hdrAuto}</option>
@@ -1040,6 +1088,9 @@ export class Hud {
 
     setText('hdr-title', s.appTitle);
     setText('lang-btn', (this.state.lang ?? 'en') === 'zh' ? 'EN' : '中文');
+    // The shortcut hint has to follow the language too, otherwise switching
+    // locales leaves the old sentence on the camera button.
+    root.getElementById('capture-btn')?.setAttribute('title', s.captureHint);
     setText('eyedropper-btn', `⊕ ${s.eyedropper}`);
     setText('false-color-btn', `◐ ${this.state.videoFalseColor ? s.falseColorOn : s.falseColor}`);
     setText('drawer-title', s.signalHdrSection);
@@ -1077,17 +1128,9 @@ export class Hud {
     const precSel = root.getElementById('precision') as HTMLSelectElement | null;
     if (precSel) {
       const cur = precSel.value;
-      setTrustedHtml(
-        precSel,
-        `
-        <option value="auto">${s.precAuto}</option>
-        <option value="low">${s.precLow}</option>
-        <option value="default">${s.precStd}</option>
-        <option value="high">${s.precHigh}</option>
-        <option value="ultra">${s.precUltra}</option>
-        <option value="native">${s.precNative}</option>`,
-      );
+      setTrustedHtml(precSel, this.precisionOptionsHtml(s));
       precSel.value = cur;
+      this.syncPrecisionAvailability();
     }
 
     const hdrSel = root.getElementById('hdr-mode') as HTMLSelectElement | null;
@@ -1944,6 +1987,11 @@ export class Hud {
       set('set-panel-opacity', String(this.state.panelOpacity ?? 0.97));
       set('set-grat-bright', String(this.state.graticuleBrightness ?? 1));
       set('set-trace-mode', this.state.defaultTraceMode ?? 'default');
+      const cap = this.state.capture ?? DEFAULT_CAPTURE;
+      set('set-capture-format', cap.format);
+      set('set-capture-scale', String(cap.scale));
+      set('set-capture-background', cap.background);
+      this.renderCaptureSizeHint();
 
       const fcEnableChk = root.getElementById('set-fc-enable') as HTMLInputElement | null;
       if (fcEnableChk) fcEnableChk.checked = !!this.state.videoFalseColor;
@@ -1964,6 +2012,162 @@ export class Hud {
     } finally {
       this.syncing = false;
     }
+  }
+
+  /** Index of the panel currently marked active in the grid. */
+  private activeSlotIndex(): number {
+    const cells = resolveCells(this.state, this.state.layout);
+    return Math.min(cells.length - 1, Math.max(0, this.state.activeSlot || 0));
+  }
+
+  /** Last known source video width, used by the "match source" multiplier. */
+  private lastSourceWidth: number | undefined;
+
+  /** Last known source video height, used to enable or grey out the presets. */
+  private lastSourceHeight: number | undefined;
+
+  /**
+   * Recording the source size keeps the precision menu honest: a preset that
+   * would only upscale the picture is greyed out instead of silently wasting
+   * GPU time.
+   */
+  setSourceSize(width: number | undefined, height: number | undefined): void {
+    this.lastSourceWidth = width && width > 0 ? width : undefined;
+    this.lastSourceHeight = height && height > 0 ? height : undefined;
+    this.syncPrecisionAvailability();
+    if (this.settingsOpen) this.renderCaptureSizeHint();
+  }
+
+  /**
+   * Options for the analysis-resolution menu. Fixed presets are disabled when
+   * the source is smaller than the preset's long edge; `full` always follows
+   * the source, so it stays enabled.
+   */
+  private precisionOptionsHtml(s: I18nStrings): string {
+    const rows = [
+      { value: 'auto', label: s.precAuto },
+      { value: 'low', label: s.precLow },
+      { value: 'default', label: s.precStd },
+      { value: 'high', label: s.precHigh },
+      { value: 'ultra', label: s.precUltra },
+      { value: 'fhd', label: s.precFhd },
+      { value: 'full', label: s.precFull },
+    ];
+    return rows
+      .map(
+        (row) =>
+          `<option value="${row.value}">${row.label}</option>`,
+      )
+      .join('');
+  }
+
+  /** Re-evaluate which presets the current source can still feed. */
+  private syncPrecisionAvailability(): void {
+    const root = this.root;
+    if (!root) return;
+    const sel = root.getElementById('precision') as HTMLSelectElement | null;
+    if (!sel) return;
+    const title = this.i18n().precTooSmall;
+    for (const option of Array.from(sel.querySelectorAll<HTMLOptionElement>('option'))) {
+      const value = option.value as PrecisionMode;
+      // `auto` resolves at runtime, so it is never gated.
+      const ok =
+        value === 'auto' || presetAvailable(value, this.lastSourceWidth, this.lastSourceHeight);
+      option.disabled = !ok;
+      option.title = ok ? '' : title;
+    }
+    // A disabled option cannot be focused, so the explanation has to live on
+    // the closed <select> as well.
+    const blocked = Array.from(sel.querySelectorAll<HTMLOptionElement>('option')).some(
+      (option) => option.disabled,
+    );
+    sel.title = blocked ? title : '';
+    // If the saved preset became unusable, fall back to whichever tier still
+    // works instead of silently drawing an upscaled texture.
+    if (this.state.precision !== 'auto') {
+      const ok = presetAvailable(
+        this.state.precision,
+        this.lastSourceWidth,
+        this.lastSourceHeight,
+      );
+      if (!ok) {
+        const candidate = largestFixedPreset(this.lastSourceWidth, this.lastSourceHeight);
+        // A source smaller than even `low` has no fixed tier left; `auto`
+        // resolves to the cheapest tier on its own and always works.
+        const fallback: PrecisionMode = presetAvailable(
+          candidate,
+          this.lastSourceWidth,
+          this.lastSourceHeight,
+        )
+          ? candidate
+          : 'auto';
+        // Only notify when the value actually changes: this runs from
+        // syncInputs, and onStateChange loops back through refreshHud.
+        if (fallback !== this.state.precision) {
+          sel.value = fallback;
+          this.state = { ...this.state, precision: fallback };
+          this.handlers.onStateChange({ precision: fallback });
+        }
+      }
+    }
+  }
+
+  /** Plane count the exporter will size this panel's density buffer against. */
+  private planesForPanel(target: PanelTargets): number {
+    const cell = resolveCells(this.state, this.state.layout)[target.slot];
+    return planesForOptions({
+      mode: target.mode,
+      channel: 0,
+      waveChannels: cell?.waveChannels,
+      paradeMode: cell?.paradeMode,
+      histMode: cell?.histMode,
+      traceMode: cell?.traceMode,
+    });
+  }
+
+  /**
+   * Show the pixel size the next snapshot will produce, so "3x" is not a
+   * mystery number and a clamped result is visible before it happens.
+   */
+  private renderCaptureSizeHint(): void {
+    const root = this.root;
+    if (!root) return;
+    const hint = root.getElementById('capture-size-hint');
+    if (!hint) return;
+    const panels = [...this.targets].sort((a, b) => a.slot - b.slot);
+    if (panels.length === 0) {
+      hint.textContent = '';
+      return;
+    }
+    const capture = this.state.capture ?? DEFAULT_CAPTURE;
+    const plan = planCaptureLayout({
+      slots: panels.map((p) => p.slot),
+      grid: this.state.layout,
+      cells: panels.map((p) => ({
+        cssWidth: Math.max(1, Math.round(p.gpu.clientWidth)),
+        cssHeight: Math.max(1, Math.round(p.gpu.clientHeight)),
+        mode: p.mode,
+        // Same plane count the exporter will size its density buffer against,
+        // so the hint cannot promise a size the real clamp would refuse.
+        planes: this.planesForPanel(p),
+      })),
+      scale: capture.scale,
+      sourceWidth: this.lastSourceWidth,
+      wavePad: WAVE_PAD,
+      gap: 3,
+      // Conservative defaults until the device is queried; the exporter
+      // re-plans against the real limits, so this hint never over-promises.
+      limits: {
+        maxEdge: 8192,
+        maxDensityBytes: 128 * 1024 * 1024,
+      },
+    });
+    const size = `${plan.width} × ${plan.height}`;
+    const label = capture.scale === 'match' ? 'match' : `${capture.scale}×`;
+    const shape = `${plan.cols}×${plan.rows}`;
+    hint.textContent = plan.clamped
+      ? `${size} ${shape} (${label} · ${this.i18n().captureGpuLimit})`
+      : `${size} ${shape} (${label})`;
   }
 
   private wireSettingsSheet(): void {
@@ -2107,6 +2311,34 @@ export class Hud {
       });
     }
 
+    const setCapture = (patch: Partial<CaptureSettings>): void => {
+      const capture: CaptureSettings = { ...(this.state.capture ?? DEFAULT_CAPTURE), ...patch };
+      this.state = { ...this.state, capture };
+      this.renderCaptureSizeHint();
+      this.syncSettingsModal();
+      this.handlers.onStateChange({ capture });
+    };
+
+    bindSet('set-capture-format', 'change', (el) => {
+      const format = el.value as CaptureSettings['format'];
+      const capture = { ...(this.state.capture ?? DEFAULT_CAPTURE), format };
+      // A transparent plate cannot be stored in JPEG; show what will happen.
+      const background = effectiveBackground(format, capture.background);
+      setCapture({ format, background });
+    });
+    bindSet('set-capture-scale', 'change', (el) => {
+      const raw = el.value;
+      const scale: CaptureSettings['scale'] = raw === 'match' ? 'match' : (Number(raw) as 1 | 2 | 3 | 4);
+      setCapture({ scale });
+    });
+    bindSet('set-capture-background', 'change', (el) => {
+      setCapture({ background: el.value as CaptureSettings['background'] });
+    });
+
+    root.getElementById('capture-now-btn')?.addEventListener('click', () => {
+      this.handlers.onCapture?.();
+    });
+
     root.getElementById('reset-all-btn')?.addEventListener('click', () => {
       const keepLang = this.state.lang;
       const keepPos = this.state.hostPosition;
@@ -2134,6 +2366,16 @@ export class Hud {
     root.getElementById('close')?.addEventListener('click', () => this.handlers.onClose());
     root.getElementById('pip-btn')?.addEventListener('click', () => this.handlers.onOpenPip());
     root.getElementById('perf')?.addEventListener('click', () => this.handlers.onToggleLock());
+
+    root.getElementById('capture-btn')?.addEventListener('click', (e: Event) => {
+      // Plain click exports the whole layout (2x2 in quad, a 1x3 column in
+      // triple); Shift/Alt narrows it to just the active panel.
+      const single = (e as MouseEvent).shiftKey || (e as MouseEvent).altKey;
+      this.handlers.onCapture?.(single ? this.activeSlotIndex() : undefined);
+    });
+    // The template carries the plain label; the shortcut hint is long and only
+    // belongs in the tooltip. applyLocalization() re-applies it on locale change.
+    root.getElementById('capture-btn')?.setAttribute('title', this.i18n().captureHint);
 
     root.getElementById('lang-btn')?.addEventListener('click', () => {
       const lang: Locale = (this.state.lang ?? 'en') === 'zh' ? 'en' : 'zh';
@@ -2406,5 +2648,8 @@ export class Hud {
     } finally {
       this.syncing = false;
     }
+    // Runs outside the `syncing` guard: an unusable saved preset falls back
+    // through onStateChange, and that path must not be swallowed.
+    this.syncPrecisionAvailability();
   }
 }

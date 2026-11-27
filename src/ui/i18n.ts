@@ -32,7 +32,9 @@ export interface I18nStrings {
   precStd: string;
   precHigh: string;
   precUltra: string;
-  precNative: string;
+  precFhd: string;
+  precTooSmall: string;
+  precFull: string;
   hdrAuto: string;
 
   fcAuto: string;
@@ -124,6 +126,22 @@ export interface I18nStrings {
   lblFcLegend: string;
   fcOffscreenHint: string;
 
+  secCapture: string;
+  lblCaptureFormat: string;
+  lblCaptureScale: string;
+  lblCaptureBackground: string;
+  captureScaleMatch: string;
+  bgPanel: string;
+  bgTransparent: string;
+  bgWhite: string;
+  captureHint: string;
+  captureAccuracyHint: string;
+  btnCapture: string;
+  captureSaved: string;
+  captureFailed: string;
+  captureBusy: string;
+  captureGpuLimit: string;
+
   btnResetAll: string;
   btnDone: string;
 }
@@ -163,7 +181,9 @@ const EN: I18nStrings = {
   precStd: 'Std 640p',
   precHigh: 'High 854p',
   precUltra: 'Ultra 1280p',
-  precNative: 'Native 1:1',
+  precFhd: 'FHD 1920p',
+  precTooSmall: 'Source is smaller than this preset',
+  precFull: 'Full 1:1 (source)',
   hdrAuto: 'HDR: Auto',
 
   fcAuto: 'FC: Auto',
@@ -253,6 +273,24 @@ const EN: I18nStrings = {
   lblFcLegend: 'Show Scale Legend on Video',
   fcOffscreenHint: 'False Color is ON — scroll the main video into the viewport to display the overlay.',
 
+  secCapture: 'Panel Snapshot',
+  lblCaptureFormat: 'Format',
+  lblCaptureScale: 'Resolution',
+  lblCaptureBackground: 'Background',
+  captureScaleMatch: 'Match source',
+  bgPanel: 'Panel gray',
+  bgTransparent: 'Transparent',
+  bgWhite: 'White',
+  captureHint:
+    'Click the camera to export the whole layout (2×2 in quad, a column in triple). Hold ⇧ or ⌥ for just the active panel.',
+  captureAccuracyHint:
+    'Snapshots re-render at a higher multiplier, but detail is capped by the analysis precision. Pick “Full 1:1” to export true per-pixel detail.',
+  btnCapture: 'Save snapshot',
+  captureSaved: 'Snapshot saved',
+  captureFailed: 'Snapshot failed',
+  captureBusy: 'Rendering snapshot…',
+  captureGpuLimit: 'GPU limit',
+
   btnResetAll: 'Reset All Defaults',
   btnDone: 'Done',
 };
@@ -289,7 +327,9 @@ const ZH: I18nStrings = {
   precStd: '标准 640p',
   precHigh: '高清 854p',
   precUltra: '超清 1280p',
-  precNative: '原画 1:1',
+  precFhd: 'FHD 1920p',
+  precTooSmall: '视频源分辨率低于该档位',
+  precFull: '全分辨率 1:1 (源)',
   hdrAuto: 'HDR: 自动',
 
   fcAuto: '伪色: 自动',
@@ -378,6 +418,24 @@ const ZH: I18nStrings = {
   lblFcOpacity: '叠加透明度',
   lblFcLegend: '在视频左下角显示伪色标尺图例',
   fcOffscreenHint: '伪色已开启：当前目标视频不在可视区域内，请滚动至主视频画面。',
+
+  secCapture: '画面截图导出',
+  lblCaptureFormat: '文件格式',
+  lblCaptureScale: '导出分辨率',
+  lblCaptureBackground: '背景',
+  captureScaleMatch: '匹配源',
+  bgPanel: '面板灰底',
+  bgTransparent: '透明',
+  bgWhite: '白底',
+  captureHint:
+    '点相机按钮导出当前整个布局（四宫格为 2×2，三宫格为竖排一列）；按住 ⇧ 或 ⌥ 只截选中的面板。',
+  captureAccuracyHint:
+    '截图会以更高倍率重新渲染，但细节上限仍由分析精度决定。想要真实像素级细节，请把精度设为“全分辨率 1:1”。',
+  btnCapture: '保存截图',
+  captureSaved: '截图已保存',
+  captureFailed: '截图失败',
+  captureBusy: '正在渲染截图…',
+  captureGpuLimit: 'GPU 上限',
 
   btnResetAll: '恢复默认设置',
   btnDone: '完成',

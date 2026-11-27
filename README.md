@@ -24,12 +24,14 @@ chrome://extensions → Developer mode → Load unpacked → unzipped folder →
 
 - [What it measures](#what-it-measures) — the five scopes and how to read them
 - [How it reads the signal](#how-it-reads-the-signal) — one code-value axis, range detection, false colour
-- [Performance](#performance) — zero-copy upload, fixed analysis size, adaptive governor
+- [Performance](#performance) — zero-copy upload, analysis resolution, adaptive governor
+- [Snapshots](#snapshots) — export a panel as PNG/JPEG/WebP
 - [Install & use](#install)
 - [Development & verification](#development)
 - [Architecture](#architecture)
 - [Known limitations & privacy](#known-limitations)
 - [Open source, credits & licence](#open-source-credits--licence)
+- [Changelog](#changelog)
 - [Prior art](#prior-art)
 
 ---
@@ -112,10 +114,52 @@ Roughly 9–10× less time in the upload step, and nothing copied. The copy path
 stays as the fallback for cross-origin video, where import throws a
 `SecurityError`.
 
-**Fixed analysis resolution.** Each frame is downscaled once to a 640-pixel long
-edge (640×360 for 16:9) and that single texture feeds every scope. Cost is
-therefore independent of source resolution — the 4K version of a frame costs the
-same as the 720p one.
+**One downscale per frame, fed to every scope.** Each frame is scaled once and
+that single texture feeds all scopes, so the upload and scale cost does not
+multiply with the number of panels — only the per-scope accumulate pass does.
+Each preset sets a *target* long edge, and a per-preset pixel budget shrinks
+the result further if the target would overshoot it. Both numbers matter, so
+here is what a 16:9 source actually gets:
+
+| Preset | Target long edge | Pixel cap | 16:9 result | Use it for |
+| --- | --- | --- | --- | --- |
+| Eco | 320 px | 0.4 MP | 320×180 | crowded pages, weak GPUs |
+| Std | 640 px | 0.4 MP | 640×360 | default; the balance point |
+| High | 854 px | 0.4 MP | **843×474** | finer waveform detail |
+| Ultra | 1280 px | 0.95 MP | 1280×720 | near-source analysis |
+| FHD | 1920 px | 2.1 MP | 1920×1080 | 1:1 with 1080p footage |
+| Full | source | none | 1920×1080 … 8192×4608 | 1:1 with any source |
+
+`High` is the one row where the cap binds: 854×480 would be 410 k pixels, over
+the 400 k budget, so it settles at 843×474.
+
+Every preset except `Full` is a *fixed* target, so a source that is already
+smaller than the target cannot gain anything from it — that preset would only
+upscale. Those entries are greyed out in the menu while such a source is
+playing, and an already-selected one falls back to the largest preset the source
+can still feed. `FHD` is the one that bites most often: it is available from
+1080p up, which is why it reads `FHD 1920p` rather than `Native 1:1` — it is a
+fixed 1920-long-edge tier, not a promise to stay 1:1.
+
+`Full` is the only preset with no pixel cap, so it really is 1:1 — a 4K source
+is analysed at 3840×2160, verified against the live device. It is also the only
+preset that scales with the source: everything below it produces the same
+analysis texture for a 1080p and a 4K source, and `Full` is never greyed out
+because it always tracks the source. That makes it 4× the pixels of `FHD` at 4K,
+so it is never chosen automatically — the governor's tiers top out at `high` —
+and picking it explicitly pins the frame rate to at least 30 fps so traces do not
+lag behind playback.
+
+The ceiling is the device, not the shader. Analysis textures are capped at
+`maxTextureDimension2D` (8192 in the WebGPU spec minimum, so 16K/32K sources
+clamp rather than fail), and the density buffer at `maxStorageBufferBindingSize`.
+Cost rises with it: measured end-to-end at 4K on this machine, one waveform at
+`Full` reports 4.3 ms and four panels 6.1 ms, against 3.2 ms for the same single
+panel at `FHD`. Those figures come from the on-screen budget readout, which
+times `onSubmittedWorkDone` — an upper bound that includes compositor work, and
+the number the governor acts on. At 8K `Full`, four panels reach 21.7 ms: it
+still renders correctly, it just misses the 4 ms budget, so `Full` wants a
+smaller layout or a faster GPU.
 
 **Frame-driven, not timer-driven.** `requestVideoFrameCallback` means the scopes
 advance when the video does, and cost nothing while paused.
@@ -132,6 +176,43 @@ scopes open on a 1080p source, zero-copy upload confirmed.
 All of it runs on WebGPU, which on macOS is Metal. There is no separate Metal
 integration to add: the import, the compute gathers and the resolve passes are
 already Metal work.
+
+## Snapshots
+
+The camera button in the header saves the current layout as one image, in the
+same arrangement the grid uses on screen: a quad layout produces a 2x2 sheet,
+triple a stacked column of three, pair a row of two, and single a plain panel.
+Hold Shift or Alt while clicking to save only the active panel instead. Unlike
+a screen grab, it does not copy the visible canvas: every cell is re-rendered
+from the current analysis texture off-screen with its own live settings (mode,
+channel, zoom, pan, gain, gamma), and the graticule is repainted on top, so a
+4x export is genuinely 4x rather than an upscaled bitmap. Exports rendered
+above the panel's own pixel density get a matching gain lift, so a 4x sheet
+stays as bright as the panel instead of thinning out.
+
+Choose format, resolution and background in **Settings → Panel Snapshot**:
+
+- **Format** — PNG (lossless, keeps alpha), JPEG (small, no alpha), WebP (both).
+- **Resolution** — 1x / 2x / 3x / 4x, or **match source** to size the export to
+  the video's own width. The panel geometry (axis margins, graticule labels,
+  vectorscope ring) scales with the multiplier, so ticks stay proportionally
+  sized instead of turning into hairlines at 4x.
+- **Background** — **Transparent** for compositing into a slide or an edit,
+  **panel gray** to match what you see on screen, or **white** for print.
+
+Transparent PNGs are the intended path for dropping a scope into a document:
+the trace and graticule carry alpha, and the graticule switches to a dark-on-
+transparent palette so it stays legible without the panel behind it. JPEG cannot
+store alpha, so that combination silently falls back to a white plate rather
+than producing an unreadable file.
+
+Two things worth knowing. First, **export resolution is not analysis
+precision** — the trace is whatever the analysis texture holds, magnified. For
+true per-pixel detail set the precision preset to `Full 1:1` before capturing.
+Second, the multiplier is clamped to the GPU's texture and storage-buffer
+limits. The settings sheet previews the size it can actually produce, and when a
+capture ends up smaller than requested the notice bar says so (`GPU limit` plus
+the real pixel size) instead of silently downscaling.
 
 ## Install
 
@@ -171,13 +252,14 @@ working in fullscreen.
 ## Development
 
 ```bash
-pnpm test              # unit tests (vitest) — 290 tests
+pnpm test              # unit tests (vitest) — 343 tests
 pnpm build             # production bundle
 pnpm verify:manifest   # manifest, CSP and bundle integrity — 31 checks
 pnpm verify:e2e        # injects the built content script on a live <video> — 24 checks
 pnpm verify:ui         # panel layout, geometry, IRE axis — 15 checks
 pnpm verify:scatter    # vectorscope + CIE point clouds, locus, fill — 12 checks
 pnpm verify:cie        # CIE 1:1 axes, grid squareness, zoom, pickers — 12 checks
+pnpm verify:capture    # snapshot export: alpha, opacity, size, graticule — 23 checks
 pnpm bench:upload      # zero-copy vs copying upload
 pnpm capture:readme    # regenerate every image in this document
 ```
@@ -222,8 +304,8 @@ core (pure, unit tested)
 
 gpu
 ├── external-source          importExternalTexture wrapper (zero-copy upload)
-├── downscale-external.wgsl  external texture -> fixed analysis texture
-├── downscale.wgsl           copied source -> fixed analysis texture (fallback)
+├── downscale-external.wgsl  external texture -> analysis texture (preset-sized)
+├── downscale.wgsl           copied source -> analysis texture (preset-sized, fallback)
 ├── accumulate.wgsl          compute: pixel -> atomic density bins
 └── resolve.wgsl             phosphor transfer + composite to a transparent canvas
 ```
@@ -298,6 +380,35 @@ specifications and design references, not copied code.
 The demonstration video frame is from
 [youtube.com/watch?v=dQw4w9WgXcQ](https://www.youtube.com/watch?v=dQw4w9WgXcQ)
 and remains © its respective rights holders.
+
+## Changelog
+
+### 0.1.1 — 2026-11-27
+
+- **Full-resolution analysis.** A new `Full` precision preset analyses the video
+  at the source's own resolution (up to 8192 px, clamped to the device's WebGPU
+  limit) — true 1:1 detail instead of a fixed target. The old `Native` tier is
+  renamed `FHD` to make clear it is a fixed 1920-long-edge preset; presets a
+  source is too small to feed are greyed out and fall back automatically.
+- **Whole-layout snapshots.** The camera button now exports the entire grid as
+  one image — a 2×2 sheet for quad, a stacked column for triple, a row for pair.
+  Shift/Alt-click still exports just the active panel. Every cell is re-rendered
+  off-screen at 1×–4× (or source-matched) with transparent, panel-gray or white
+  background, so exports are genuine high-resolution renders, not upscaled
+  screen grabs.
+- **Polish and fixes.** Brighter, correctly sized high-res exports that match the
+  live panel; the floating window is requested within the click activation
+  window; a continuous spectral CIE locus and other scope-correctness fixes.
+- **Verification.** A new `verify:capture` suite adds 23 pixel-level checks for
+  snapshot alpha, opacity, size and graticule; the full suite is now `pnpm
+  verify:all`.
+
+### 0.1.0 — 2026-11-25
+
+First complete build: waveform, parade, vectorscope, CIE 1931/1976 and histogram;
+range detection from decoder metadata with mismatch warnings; five quality tiers
+with an adaptive governor; zero-copy frame upload; pixel probe, PiP and
+fullscreen support.
 
 ## Prior art
 

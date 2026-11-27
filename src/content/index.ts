@@ -41,6 +41,7 @@ import {
 import { GpuTimer } from '../core/gpu-timer';
 import { getDevice } from '../gpu/device';
 import type { AnalysisPreset } from '../gpu/downscale';
+import { describeSize, type CaptureSettings } from '../core/scopes/capture-plan';
 import { CursorProbeTooltip, Probe, formatSample, type ProbeSample } from '../ui/probe';
 import { openFloatingWindow, pipSupported, type FloatingWindow } from '../ui/pip';
 import { videoReadability, readabilityNotice, type Readability } from './readability';
@@ -218,9 +219,17 @@ function analysisPreset(): AnalysisPreset {
   return TIER_DESCRIPTION[currentTier()].preset;
 }
 
+/**
+ * Heavy analysis presets pay for themselves only if the sampling cadence keeps
+ * up with the source, so they get a floor of 30 fps even when the governor has
+ * walked the tier down. `full` belongs here: on a 4K source it is 4x the pixels
+ * of `fhd`, and sampling it at 15 fps makes the trace visibly stale.
+ */
+const HEAVY_PRECISION: ReadonlySet<string> = new Set(['ultra', 'fhd', 'full']);
+
 function applyTier(tier: QualityTier): void {
   const d = TIER_DESCRIPTION[tier];
-  const fps = state.precision === 'ultra' || state.precision === 'native' ? Math.max(30, d.fps) : d.fps;
+  const fps = HEAVY_PRECISION.has(state.precision) ? Math.max(30, d.fps) : d.fps;
   loop?.setTargetFps(fps);
   controller?.setMinInterval(1000 / fps);
   void saveSettings(state);
@@ -295,6 +304,7 @@ function refreshHud(): void {
           ? 'limited'
           : 'full';
   activeHud()?.setState(state);
+  activeHud()?.setSourceSize(detector?.video?.videoWidth, detector?.video?.videoHeight);
   activeHud()?.setColorInfo(colorInfo);
   activeHud()?.setDiagnosis(
     {
@@ -484,6 +494,9 @@ function buildController(): void {
     get dims() {
       return controller?.analysisDims ?? null;
     },
+    get precision() {
+      return state.precision;
+    },
     get transfer() {
       return currentEffectiveTransfer();
     },
@@ -493,8 +506,15 @@ function buildController(): void {
     get status() {
       return presentationStatus;
     },
+    get floatingAttempt() {
+      return lastFloatingAttempt;
+    },
     get reattachCount() {
       return reattachCount;
+    },
+    /** Options the live renderer for a slot is actually using (capture debugging). */
+    options(slot: number) {
+      return controller?.optionSnapshot(slot) ?? null;
     },
     get falseColor() {
       return {
@@ -503,23 +523,168 @@ function buildController(): void {
         ...(controller?.falseColorDiagnostics ?? {}),
       };
     },
+    /** Used by scripts/verify-capture.mjs; also handy when debugging exports. */
+    capture(slot: number, overrides?: Partial<CaptureSettings>) {
+      if (!controller) throw new Error('capture: controller not ready');
+      return controller.capturePanel(slot, { ...state.capture, ...overrides });
+    },
+    /** Export the whole layout as one sheet, exactly like the toolbar button. */
+    captureSheet(overrides?: Partial<CaptureSettings>) {
+      if (!controller) throw new Error('capture: controller not ready');
+      return controller.captureLayout(state.layout, { ...state.capture, ...overrides });
+    },
   };
   controller.onRawError = (msg) => activeHud()?.setNotice(`Raw mode unavailable: ${msg}`);
 }
 
 let presentationStatus = 'idle';
 let enablePromise: Promise<void> | null = null;
+let floatingRequest: Promise<FloatingWindow> | null = null;
 
-function enable(): Promise<void> {
+function floatingWindowOptions(): {
+  width: number;
+  height: number;
+  onClosed: () => void;
+} {
+  return {
+    width: Math.min(920, Math.round(window.screen.availWidth * 0.52)),
+    height: Math.min(700, Math.round(window.screen.availHeight * 0.74)),
+    onClosed: () => {
+      floating = null;
+      floatingHud?.unmount();
+      floatingHud = null;
+      if (enabled && !hud) {
+        void disable();
+      } else {
+        controller?.setTargets(activeHud()?.panelCanvases() ?? []);
+        presentationStatus = 'returned';
+      }
+    },
+  };
+}
+
+/**
+ * What the last window request saw, for bug reports.
+ *
+ * `activation` is sampled on the same task as `requestWindow()`, so a report
+ * showing `isActive: false` means the click's activation really had lapsed —
+ * that is the signature of the first-click bug, and it should stay impossible.
+ */
+let lastFloatingAttempt: {
+  activation: boolean;
+  hasBeenActive: boolean;
+  outcome: 'pending' | 'opened' | 'denied' | 'failed';
+  error?: string;
+} | null = null;
+
+/**
+ * Ask for the Document PiP window right now, before anything is awaited.
+ *
+ * Chrome only accepts `requestWindow()` while the click that started this chain
+ * still counts as transient user activation, and it gives that window no slack.
+ * The very first toolbar click is the worst case: the service worker still has
+ * to inject content.js and retry the message, and `enable()` used to await two
+ * storage round-trips before asking for the window. By then activation had
+ * lapsed, `requestWindow()` threw `NotAllowedError`, and the catch branch left
+ * the panel in the page — so the window only ever appeared on the second click.
+ *
+ * Calling this synchronously (it reaches `requestWindow()` before its first
+ * await) keeps the request inside the activation window; the slow start-up work
+ * then happens in a window we already own.
+ */
+function startFloatingRequest(): Promise<FloatingWindow> | null {
+  if (!pipSupported()) return null;
+  if (floating?.isOpen()) return null;
+  if (floatingRequest) return floatingRequest;
+
+  const activation = typeof navigator !== 'undefined' && 'userActivation' in navigator
+    ? navigator.userActivation
+    : undefined;
+  const attempt = {
+    activation: !!activation?.isActive,
+    hasBeenActive: !!activation?.hasBeenActive,
+    outcome: 'pending' as const,
+  };
+  lastFloatingAttempt = attempt;
+
+  const request = openFloatingWindow(floatingWindowOptions());
+  floatingRequest = request;
+  void request
+    .then(() => {
+      lastFloatingAttempt = { ...attempt, outcome: 'opened' };
+    })
+    .catch((e: unknown) => {
+      const name = e instanceof DOMException ? e.name : 'Error';
+      lastFloatingAttempt = {
+        ...attempt,
+        outcome: name === 'NotAllowedError' ? 'denied' : 'failed',
+        error: name,
+      };
+    })
+    .finally(() => {
+      if (floatingRequest === request) floatingRequest = null;
+    });
+  return request;
+}
+
+/** Move the HUD into an already opened window and rebind the controller. */
+function adoptFloatingWindow(win: FloatingWindow): void {
+  floating = win;
+
+  guardian?.stop();
+  guardian = null;
+  hud?.unmount();
+  hud = null;
+
+  floatingHud = new Hud(
+    { ...state, hostPosition: { left: 0, top: 0, right: 0 } },
+    buildHandlers(),
+  );
+  floatingHud.mount(win.document, { fill: true });
+
+  controller?.setTargets(floatingHud.panelCanvases());
+  refreshHud();
+  controller?.resize();
+  requestRedraw();
+
+  presentationStatus = 'floating';
+}
+
+function enable(options: { float?: boolean } = {}): Promise<void> {
   if (enablePromise) return enablePromise;
   if (enabled) return Promise.resolve();
   enabled = true;
 
+  // Keep this before every await: see startFloatingRequest() for why.
+  const windowRequest = options.float ? startFloatingRequest() : null;
+
   enablePromise = (async () => {
     state = { ...state, visible: true };
-    hud = buildHud();
-    hud.mount();
-    presentationStatus = 'in-page';
+    presentationStatus = 'starting';
+
+    let win: FloatingWindow | null = null;
+    if (windowRequest) {
+      try {
+        win = await windowRequest;
+      } catch {
+        win = null; // Activation lapsed after all: fall back to the in-page panel.
+      }
+    }
+
+    // The window can arrive after the user already closed the panel again.
+    // Adopting it then would leave a live window with a dead HUD, so shut it.
+    if (!enabled) {
+      win?.close();
+      return;
+    }
+
+    if (win) {
+      adoptFloatingWindow(win);
+    } else {
+      hud = buildHud();
+      hud.mount();
+      presentationStatus = 'in-page';
+    }
 
     try {
       await chrome.storage.session.set({ scopesOn: true });
@@ -529,7 +694,7 @@ function enable(): Promise<void> {
 
     try {
       state = { ...(await loadSettings()), visible: true, layout: state.layout };
-      hud.setState(state);
+      activeHud()?.setState(state);
     } catch {
       // Keep defaults
     }
@@ -670,6 +835,37 @@ function buildHandlers(): HudHandlers {
     onOpenPip() {
       void detachToFloatingWindow();
     },
+    async onCapture(slot?: number) {
+      const hud = activeHud();
+      if (!hud || !controller) return;
+      hud.setNotice(t(state.lang).captureBusy);
+      try {
+        // No slot means "export what is on screen": a quad layout yields a 2x2
+        // sheet, a triple layout a 1x3 column. A slot narrows it to one panel.
+        const result =
+          slot == null
+            ? await controller.captureLayout(state.layout, state.capture)
+            : await controller.capturePanel(slot, state.capture);
+        const url = URL.createObjectURL(result.blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = result.fileName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Revoke on the next macrotask so Chrome has picked up the download.
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        const strings = t(state.lang);
+        hud.setNotice(
+          result.clamped
+            ? `${strings.captureSaved} · ${strings.captureGpuLimit} ${describeSize(result.width, result.height)}`
+            : strings.captureSaved,
+        );
+      } catch (err) {
+        console.warn('[video-scopes] snapshot failed', err);
+        hud.setNotice(t(state.lang).captureFailed);
+      }
+    },
     onToggleLock() {
       const locked = state.lockedTier === null;
       state = { ...state, lockedTier: locked ? currentTier() : null };
@@ -702,18 +898,22 @@ function finishEnable(): void {
   }
 
   try {
-    unfollowFullscreen = followFullscreen(mounted, () => {
-      controller?.resize();
-      requestRedraw();
-    });
+    // The Document PiP host lives in another document; the in-page fullscreen
+    // and SPA-reparent guards would drag it back into this page.
+    if (!floatingHud) {
+      unfollowFullscreen = followFullscreen(mounted, () => {
+        controller?.resize();
+        requestRedraw();
+      });
 
-    guardian = keepAttached(
-      mounted,
-      overlayFullscreenParent,
-      (n) => {
-        reattachCount = n;
-      },
-    );
+      guardian = keepAttached(
+        mounted,
+        overlayFullscreenParent,
+        (n) => {
+          reattachCount = n;
+        },
+      );
+    }
 
     buildController();
 
@@ -830,11 +1030,11 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
 
 function ensureVisible(): void {
   if (!enabled) {
-    void enable().then(() => detachToFloatingWindow());
+    void enable({ float: true });
     return;
   }
   if (enablePromise) {
-    void enablePromise.then(() => detachToFloatingWindow());
+    void enablePromise;
     return;
   }
   if (floating?.isOpen()) {
@@ -843,7 +1043,7 @@ function ensureVisible(): void {
   }
   const host = document.getElementById(HOST_ID);
   if (!host) {
-    void disable().then(() => enable().then(() => detachToFloatingWindow()));
+    void disable().then(() => enable({ float: true }));
     return;
   }
   void detachToFloatingWindow();
@@ -860,44 +1060,26 @@ async function detachToFloatingWindow(): Promise<void> {
     return;
   }
 
+  // Ask for the window before the first await — this runs inside the click's
+  // task, which is the only place Chrome honours the activation.
+  const request = startFloatingRequest();
+  if (!request) {
+    guardian?.reattach();
+    return;
+  }
+
   try {
-    floating = await openFloatingWindow({
-      width: Math.min(920, Math.round(window.screen.availWidth * 0.52)),
-      height: Math.min(700, Math.round(window.screen.availHeight * 0.74)),
-      onClosed: () => {
-        floating = null;
-        floatingHud?.unmount();
-        floatingHud = null;
-        if (enabled && !hud) {
-          void disable();
-        } else {
-          controller?.setTargets(activeHud()?.panelCanvases() ?? []);
-          presentationStatus = 'returned';
-        }
-      },
-    });
-
-    guardian?.stop();
-    guardian = null;
-    hud?.unmount();
-    hud = null;
-
-    floatingHud = new Hud(
-      { ...state, hostPosition: { left: 0, top: 0, right: 0 } },
-      buildHandlers(),
-    );
-    floatingHud.mount(floating.document, { fill: true });
-
+    const win = await request;
+    adoptFloatingWindow(win);
     if (!controller) buildController();
-    controller?.setTargets(floatingHud.panelCanvases());
+    controller?.setTargets(floatingHud?.panelCanvases() ?? []);
     refreshHud();
     controller?.resize();
     requestRedraw();
-
-    presentationStatus = 'floating';
   } catch (e) {
     if (e instanceof DOMException && e.name === 'NotAllowedError') {
-      // Browser requires an in-page gesture for Document PiP; keep in-page HUD cleanly.
+      // Activation lapsed anyway (e.g. a synthetic click without a gesture);
+      // keep the in-page HUD rather than showing a dead window.
       presentationStatus = 'in-page';
       guardian?.reattach();
       return;

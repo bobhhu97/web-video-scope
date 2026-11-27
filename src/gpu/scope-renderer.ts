@@ -29,6 +29,13 @@ export type HistChannelMode = 'Y' | 'RGB' | 'YRGB' | 'YUV';
 export type TraceColorMode = 'channel' | 'monochrome' | 'colorize' | 'hdr-zones' | 'green';
 export type ToneFilter = 'all' | 'shadows' | 'midtones' | 'highlights';
 
+/**
+ * Graticule ink set. `dark` is the tuned-for-panel look; `light` swaps in
+ * slate-on-white ink for exports (transparent or light paper backgrounds),
+ * where the panel palette would be nearly invisible.
+ */
+export type GraticuleTheme = 'dark' | 'light';
+
 export interface ScopeOptions {
   mode: ScopeMode;
   channel: 0 | 1 | 2 | 3;
@@ -65,6 +72,8 @@ export interface ScopeOptions {
   nitLow?: number;
   nitHigh?: number;
   graticuleBrightness?: number;
+  /** Ink set for graticule drawing. Defaults to the panel palette (`dark`). */
+  graticuleTheme?: GraticuleTheme;
   dpr: number;
 }
 
@@ -128,8 +137,18 @@ const RES_MODE: Record<ScopeMode, number> = {
   histogram: 4,
 };
 
+/**
+ * The subset of `ScopeOptions` that decides the plane count. Callers that only
+ * hold a per-cell config (the HUD's capture-size hint) can pass this instead of
+ * fabricating a whole `ScopeOptions`.
+ */
+export type PlaneHint = Pick<
+  ScopeOptions,
+  'mode' | 'channel' | 'waveChannels' | 'paradeMode' | 'histMode' | 'traceMode'
+>;
+
 /** Legacy helper preserved for unit tests; maps Waveform channel subMode. */
-export function accChannel(o: ScopeOptions): number {
+export function accChannel(o: PlaneHint): number {
   if (o.mode === 'waveform-parade') {
     const pm = o.paradeMode ?? 'RGB';
     return pm === 'YRGB' ? 1 : pm === 'YUV' ? 2 : 0;
@@ -164,7 +183,7 @@ export function accChannel(o: ScopeOptions): number {
   return 0;
 }
 
-function traceModeCode(o: ScopeOptions): number {
+function traceModeCode(o: PlaneHint): number {
   const tm =
     o.traceMode ??
     (o.mode === 'vectorscope' || o.mode === 'cie' ? 'colorize' : 'channel');
@@ -195,7 +214,12 @@ function toneFilterCode(t: ToneFilter | undefined): number {
   return 0;
 }
 
-function planesForOptions(o: ScopeOptions): number {
+/**
+ * How many accumulation planes the density buffer needs for these options.
+ * Exported so the image exporter can size its offscreen renderer against the
+ * device limits *before* allocating anything (see `planCapture`).
+ */
+export function planesForOptions(o: PlaneHint): number {
   if (o.mode === 'histogram') return 4;
   const tm = traceModeCode(o);
   if (o.mode === 'vectorscope' || o.mode === 'cie') {

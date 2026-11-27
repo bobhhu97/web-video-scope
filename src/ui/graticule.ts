@@ -23,15 +23,123 @@ import {
   vectorscopeFrame,
   vectorscopeToScreen,
 } from '../core/color/vectorscope-frame';
-import type { ScopeOptions } from '../gpu/scope-renderer';
+import type { GraticuleTheme, ScopeOptions } from '../gpu/scope-renderer';
+
+export type { GraticuleTheme };
 
 export const WAVE_PAD = { top: 14, right: 10, bottom: 22, left: 44 } as const;
 
-const GRID = '#1b232b';
-const GRID_MAJOR = '#33414d';
-const LEGAL = '#5d7f93';
-const BAND = 'rgba(255,255,255,0.035)';
-const TEXT = '#7d8b96';
+interface Palette {
+  grid: string;
+  gridMajor: string;
+  legal: string;
+  band: string;
+  text: string;
+  tagBg: string;
+  statusBg: string;
+  midLine: string;
+  paradeMid: string;
+  locus: string;
+  whitePoint: string;
+}
+
+/**
+ * Screen palette: tuned against the dark HUD panel (#0a0e12).
+ * Light palette: dark slate ink so the same graticule reads on a white page,
+ * a slide, or a transparent export dropped onto a light document.
+ */
+const DARK_PALETTE: Palette = {
+  grid: '#1b232b',
+  gridMajor: '#33414d',
+  legal: '#5d7f93',
+  band: 'rgba(255,255,255,0.035)',
+  text: '#7d8b96',
+  tagBg: 'rgba(11, 15, 18, 0.82)',
+  statusBg: 'rgba(10, 14, 20, 0.78)',
+  midLine: '#3b5163',
+  paradeMid: '#486378',
+  locus: '#4a5a66',
+  whitePoint: '#e8e8e8',
+};
+
+const LIGHT_PALETTE: Palette = {
+  grid: 'rgba(71, 85, 105, 0.28)',
+  gridMajor: 'rgba(51, 65, 85, 0.62)',
+  legal: '#64748b',
+  band: 'rgba(100, 116, 139, 0.09)',
+  text: '#475569',
+  tagBg: 'rgba(255, 255, 255, 0.86)',
+  statusBg: 'rgba(255, 255, 255, 0.86)',
+  midLine: '#94a3b8',
+  paradeMid: '#94a3b8',
+  locus: '#64748b',
+  whitePoint: '#334155',
+};
+
+function usePalette(p: Palette): void {
+  GRID = p.grid;
+  GRID_MAJOR = p.gridMajor;
+  LEGAL = p.legal;
+  BAND = p.band;
+  TEXT = p.text;
+  TAG_BG = p.tagBg;
+  STATUS_BG = p.statusBg;
+  MID_LINE = p.midLine;
+  PARADE_MID = p.paradeMid;
+  LOCUS_STROKE = p.locus;
+  WHITE_POINT = p.whitePoint;
+}
+
+/**
+ * Run `fn` with one palette installed, restoring the screen palette afterwards
+ * even if a draw throws. Used by `drawGraticule`; kept private so callers can
+ * never leave the overlay tinted for export.
+ */
+function withPalette<T>(theme: GraticuleTheme | undefined, fn: () => T): T {
+  const prev: Palette = {
+    grid: GRID,
+    gridMajor: GRID_MAJOR,
+    legal: LEGAL,
+    band: BAND,
+    text: TEXT,
+    tagBg: TAG_BG,
+    statusBg: STATUS_BG,
+    midLine: MID_LINE,
+    paradeMid: PARADE_MID,
+    locus: LOCUS_STROKE,
+    whitePoint: WHITE_POINT,
+  };
+  usePalette(theme === 'light' ? LIGHT_PALETTE : DARK_PALETTE);
+  try {
+    return fn();
+  } finally {
+    usePalette(prev);
+  }
+}
+
+/**
+ * Graticule ink colours.
+ *
+ * These are `let` bindings rather than `const` because the exporter re-renders
+ * one panel off-screen on a light or transparent background: dark grey-on-black
+ * ink is invisible there. `drawGraticule` swaps the whole set for the duration
+ * of a single synchronous draw (see `withPalette`) and always restores it, so
+ * the live overlay never sees the export palette. Every draw entry point is
+ * synchronous, so no interleaving is possible.
+ */
+let GRID = '#1b232b';
+let GRID_MAJOR = '#33414d';
+let LEGAL = '#5d7f93';
+let BAND = 'rgba(255,255,255,0.035)';
+let TEXT = '#7d8b96';
+/** Chip behind HDR threshold tags, and behind the vectorscope status text. */
+let TAG_BG = 'rgba(11, 15, 18, 0.82)';
+let STATUS_BG = 'rgba(10, 14, 20, 0.78)';
+/** The 50% reference lines and the CIE spectral locus / white point. */
+let MID_LINE = '#3b5163';
+let PARADE_MID = '#486378';
+let LOCUS_STROKE = '#4a5a66';
+let WHITE_POINT = '#e8e8e8';
 const HDR_REF_WHITE_COLOR = '#facc15';
 const NIT_LOW_COLOR = '#38bdf8';
 const NIT_WARN_COLOR = '#facc15';
@@ -194,7 +302,7 @@ function drawHdrThresholdLinesY(
     const labelW = ctx.measureText(t.tag).width + 6;
     const bx = plotLeft + plotW - labelW - 3;
     const by = Math.min(plotTop + plotH - 11, Math.max(plotTop + 1, y - 5.5));
-    ctx.fillStyle = 'rgba(11, 15, 18, 0.82)';
+    ctx.fillStyle = TAG_BG;
     ctx.fillRect(bx, by, labelW, 11);
     ctx.fillStyle = t.color;
     ctx.textAlign = 'left';
@@ -295,7 +403,7 @@ export function drawWaveformGraticule(ctx: CanvasRenderingContext2D, o: ScopeOpt
     const rel50 = (0.5 - panY) * zoom;
     if (rel50 >= 0 && rel50 <= 1) {
       const y50 = axisToCanvasY(0.5, plotTop, plotH, zoom, panY);
-      ctx.strokeStyle = '#3b5163';
+      ctx.strokeStyle = MID_LINE;
       ctx.setLineDash([2, 3]);
       ctx.beginPath();
       ctx.moveTo(plotLeft, y50);
@@ -324,7 +432,7 @@ export function drawWaveformGraticule(ctx: CanvasRenderingContext2D, o: ScopeOpt
       const rel50 = (0.5 - panY) * zoom;
       if (rel50 >= 0 && rel50 <= 1) {
         const y50 = axisToCanvasY(0.5, plotTop, plotH, zoom, panY);
-        ctx.strokeStyle = '#486378';
+        ctx.strokeStyle = PARADE_MID;
         ctx.beginPath();
         ctx.moveTo(plotLeft + plotW / 3, y50);
         ctx.lineTo(plotLeft + plotW, y50);
@@ -636,7 +744,7 @@ export function drawVectorscopeGraticule(ctx: CanvasRenderingContext2D, o: Scope
   const statusText = `${o.matrix.toUpperCase()} · ${Math.round(primaryLevel * 100)}%${sigTag}${zoomTag}${toneTag}`;
   if (frame.zoom > 1.01) {
     const tw = ctx.measureText(statusText).width;
-    ctx.fillStyle = 'rgba(10, 14, 20, 0.78)';
+    ctx.fillStyle = STATUS_BG;
     ctx.fillRect(5, 4, tw + 6, 15);
   }
   ctx.fillStyle = TEXT;
@@ -747,6 +855,10 @@ export function drawCieGraticule(
   const h = o.height;
   ctx.clearRect(0, 0, w, h);
 
+  // dpr stays 1 here on purpose: this canvas is drawn in CSS pixels (the caller
+  // already applied `setTransform(dpr, ...)`), so the padding must be measured in
+  // CSS pixels too. The GPU renderer works in device pixels and passes its own
+  // dpr; both paths land on the same visual padding.
   const frame = cieViewportFrame(w, h, o.coord, o.zoom, o.panX, o.panY, 1);
 
   // Draw gridlines & numeric ticks first so the horseshoe & gamut triangles stay crisp above the grid
@@ -765,7 +877,7 @@ export function drawCieGraticule(
   ctx.beginPath();
   pts.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
   ctx.closePath();
-  ctx.strokeStyle = '#4a5a66';
+  ctx.strokeStyle = LOCUS_STROKE;
   ctx.lineWidth = 1;
   ctx.stroke();
 
@@ -823,7 +935,7 @@ export function drawCieGraticule(
 
   const white = o.coord === 'xy' ? ([0.3127, 0.329] as const) : xyToUv(0.3127, 0.329);
   const [wx, wy] = frameToScreen(frame, white[0], white[1]);
-  ctx.strokeStyle = '#e8e8e8';
+  ctx.strokeStyle = WHITE_POINT;
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(wx - 5, wy);
@@ -960,24 +1072,26 @@ export function drawGraticule(
   o: ScopeOptions,
   gamuts: readonly PrimariesId[] = ['rec709'],
 ): void {
-  const effectiveGamuts = o.gamuts && o.gamuts.length > 0 ? o.gamuts : gamuts;
-  const bright = Math.max(0.35, Math.min(1.6, o.graticuleBrightness ?? 1));
-  ctx.save();
-  if (Math.abs(bright - 1) > 0.02) {
-    ctx.globalAlpha = Math.min(1, bright);
-  }
-  switch (o.mode) {
-    case 'vectorscope':
-      drawVectorscopeGraticule(ctx, o);
-      break;
-    case 'cie':
-      drawCieGraticule(ctx, { ...o, gamuts: [...effectiveGamuts] });
-      break;
-    case 'histogram':
-      drawHistogramGraticule(ctx, o);
-      break;
-    default:
-      drawWaveformGraticule(ctx, o);
-  }
-  ctx.restore();
+  withPalette(o.graticuleTheme, () => {
+    const effectiveGamuts = o.gamuts && o.gamuts.length > 0 ? o.gamuts : gamuts;
+    const bright = Math.max(0.35, Math.min(1.6, o.graticuleBrightness ?? 1));
+    ctx.save();
+    if (Math.abs(bright - 1) > 0.02) {
+      ctx.globalAlpha = Math.min(1, bright);
+    }
+    switch (o.mode) {
+      case 'vectorscope':
+        drawVectorscopeGraticule(ctx, o);
+        break;
+      case 'cie':
+        drawCieGraticule(ctx, { ...o, gamuts: [...effectiveGamuts] });
+        break;
+      case 'histogram':
+        drawHistogramGraticule(ctx, o);
+        break;
+      default:
+        drawWaveformGraticule(ctx, o);
+    }
+    ctx.restore();
+  });
 }

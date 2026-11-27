@@ -4,8 +4,8 @@ Single source of truth for the store listing, permission justifications, privacy
 disclosure and publishing readiness. Copy-paste from here into the Chrome
 Developer Dashboard.
 
-- **Last Updated:** 2026-11-25
-- **Current version:** 0.1.0
+- **Last Updated:** 2026-11-27
+- **Current version:** 0.1.1
 - **Status:** not submitted
 
 ---
@@ -140,6 +140,7 @@ writes scope images to `docs/screenshots/`.
 
 | Version | Date | Summary |
 | --- | --- | --- |
+| 0.1.1 | 2026-11-27 | Full-resolution 1:1 analysis preset (up to 8192 px) with source-size gating and FHD renaming. Whole-layout snapshot export as one PNG/JPEG/WebP sheet with format, resolution (1x–4x / match source) and background settings; transparent composites and HiDPI gain lift. Brighter, correctly sized high-res exports; floating-window activation fix. 23 new snapshot verification checks. |
 | 0.1.0 | 2026-11-25 | First complete build. Waveform (luma / RGB / parade), vectorscope, CIE 1931 and 1976 diagrams. Range detection from decoder metadata with mismatch warnings. Five quality tiers with automatic down-adjustment. Zero-copy video upload. Pixel probe, picture-in-picture, fullscreen support. |
 
 ---
