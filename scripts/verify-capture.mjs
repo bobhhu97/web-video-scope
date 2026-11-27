@@ -184,6 +184,29 @@ try {
   check('white background export is fully opaque', w.transparent === 0, `${w.transparent} transparent px`);
   check('white background still renders a trace', w.lit > 200, `${w.lit} lit px`);
 
+  // ---- 3b. Panel plate matches the live cell colour ----------------------
+  // The scope canvas sits on `.cell`, not on the panel chrome. A darker plate
+  // made exports read dimmer than the panel even though the trace matched.
+  const plate = await page.evaluate(async () => {
+    const root = document.querySelector('#video-scopes-host').shadowRoot;
+    const cell = root.querySelector('.cell');
+    const slot = Number(cell?.dataset.slot ?? 0);
+    const live = getComputedStyle(cell).backgroundColor.match(/\d+/g).map(Number);
+    const r = await window.__scopeDebug.capture(slot, { format: 'png', scale: 1, background: 'panel' });
+    const bmp = await createImageBitmap(r.blob);
+    const c2d = document.createElement('canvas');
+    c2d.width = bmp.width;
+    c2d.height = bmp.height;
+    const ctx = c2d.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bmp, 0, 0);
+    const d = ctx.getImageData(0, 0, 2, 2).data;
+    bmp.close();
+    return { live, exp: [d[0], d[1], d[2], d[3]] };
+  });
+  check('panel plate matches the live cell colour',
+    plate.exp[0] === plate.live[0] && plate.exp[1] === plate.live[1] && plate.exp[2] === plate.live[2] && plate.exp[3] === 255,
+    `live rgb(${plate.live.slice(0, 3)}) vs export rgb(${plate.exp.slice(0, 3)}) a=${plate.exp[3]}`);
+
   // ---- 4. JPEG cannot carry alpha ----------------------------------------
   const j = await capture({ format: 'jpeg', scale: 1, background: 'transparent' });
   check('JPEG falls back to an opaque plate', j.mime === 'image/jpeg' && j.transparent === 0,
@@ -272,6 +295,26 @@ try {
     check('all four quadrants contain content',
       sheet.quad.every((n) => n > 200), sheet.quad.join(','));
   }
+
+  // ---- 7b. The gutter between tiles keeps the live grid colour ----------
+  const gutter = await page.evaluate(async () => {
+    const root = document.querySelector('#video-scopes-host').shadowRoot;
+    const live = getComputedStyle(root.querySelector('.grid')).backgroundColor.match(/\d+/g).map(Number);
+    const r = await window.__scopeDebug.captureSheet({ format: 'png', scale: 1, background: 'panel' });
+    const bmp = await createImageBitmap(r.blob);
+    const c2d = document.createElement('canvas');
+    c2d.width = bmp.width;
+    c2d.height = bmp.height;
+    const ctx = c2d.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bmp, 0, 0);
+    const midX = Math.floor(bmp.width / 2);
+    const d = ctx.getImageData(midX, 1, 1, 1).data;
+    bmp.close();
+    return { live, exp: [d[0], d[1], d[2]] };
+  });
+  check('sheet gutter matches the live grid colour',
+    gutter.exp[0] === gutter.live[0] && gutter.exp[1] === gutter.live[1] && gutter.exp[2] === gutter.live[2],
+    `live rgb(${gutter.live.slice(0, 3)}) vs export rgb(${gutter.exp})`);
 
   // ---- 8. Triple exports as one wide row --------------------------------
   // On screen triple stacks vertically; the export deliberately goes wide.

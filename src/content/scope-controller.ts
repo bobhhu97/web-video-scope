@@ -252,6 +252,18 @@ export class ScopeController {
   }
 
   /**
+   * Diagnostic snapshot of the options a slot is currently rendering with.
+   * Used by the capture probes to prove that the export path reads the same
+   * gain/gamma the live renderer holds.
+   */
+  optionSnapshot(slot: number): ScopeOptions | null {
+    const target = this.targets.find((t) => t.slot === slot);
+    const renderer = this.renderers.get(slot);
+    if (!target) return null;
+    return renderer ? { ...renderer.options } : this.optionsFor(slot, target.mode);
+  }
+
+  /**
    * Capture one live panel as an image.
    *
    * Re-renders the analysis texture the panel is currently showing (rather

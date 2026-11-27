@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   CAPTURE_SCALE_OPTIONS,
   DEFAULT_CAPTURE,
+  GRID_BG,
   PANEL_BG,
   PAPER_BG,
   captureFileName,
@@ -133,7 +134,8 @@ describe('capture format helpers', () => {
 
   it('formats sizes for the UI and exports the palette constants', () => {
     expect(describeSize(3840, 2160)).toBe('3840 × 2160');
-    expect(PANEL_BG).toBe('#0a0e12');
+    expect(PANEL_BG).toBe('#0c1016');
+    expect(GRID_BG).toBe('#06090c');
     expect(PAPER_BG).toBe('#ffffff');
   });
 });

@@ -41,7 +41,13 @@ export const DEFAULT_CAPTURE: CaptureSettings = {
 };
 
 /** Grey used by the live panel; exports keep the same look when not transparent. */
-export const PANEL_BG = '#0a0e12';
+export const PANEL_BG = '#0c1016';
+/**
+ * Gutter colour between cells, matching the live `.grid` background. A sheet
+ * export paints this first and then fills each tile with `PANEL_BG`, so the
+ * seams read the same as the on-screen layout.
+ */
+export const GRID_BG = '#06090c';
 export const PAPER_BG = '#ffffff';
 
 /** Multipliers offered in the settings sheet, in display order. */

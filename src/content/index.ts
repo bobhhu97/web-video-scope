@@ -512,6 +512,10 @@ function buildController(): void {
     get reattachCount() {
       return reattachCount;
     },
+    /** Options the live renderer for a slot is actually using (capture debugging). */
+    options(slot: number) {
+      return controller?.optionSnapshot(slot) ?? null;
+    },
     get falseColor() {
       return {
         enabled: !!state.videoFalseColor,

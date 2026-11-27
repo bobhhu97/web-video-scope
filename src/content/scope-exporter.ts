@@ -23,6 +23,7 @@ import type { AnalysisTexture } from '../gpu/downscale';
 import type { CanvasGpu } from '../gpu/device';
 import type { PrimariesId } from '../core/color/primaries';
 import {
+  GRID_BG,
   PANEL_BG,
   PAPER_BG,
   captureFileName,
@@ -229,8 +230,14 @@ export async function renderSheetImage(req: CaptureSheetRequest): Promise<Captur
 
   const { canvas: out, ctx } = canvas2d(plan.width, plan.height);
   if (background === 'panel') {
-    ctx.fillStyle = PANEL_BG;
+    // Match the live layout: the grid background shows through the gutters,
+    // while each tile sits on the slightly lighter cell colour.
+    ctx.fillStyle = GRID_BG;
     ctx.fillRect(0, 0, plan.width, plan.height);
+    ctx.fillStyle = PANEL_BG;
+    for (const cell of plan.cells) {
+      ctx.fillRect(cell.x, cell.y, cell.width, cell.height);
+    }
   } else if (background === 'white') {
     ctx.fillStyle = PAPER_BG;
     ctx.fillRect(0, 0, plan.width, plan.height);
