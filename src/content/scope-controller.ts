@@ -29,6 +29,8 @@ import {
   splitP010,
 } from '../gpu/raw-planes';
 import { ExternalVideoSource } from '../gpu/external-source';
+import { renderPanelImage, type CaptureResult } from './scope-exporter';
+import type { CaptureSettings } from '../core/scopes/capture-plan';
 import DOWNSCALE_WGSL from '../gpu/shaders/downscale.wgsl?raw';
 import DOWNSCALE_EXTERNAL_WGSL from '../gpu/shaders/downscale-external.wgsl?raw';
 import RAW_DOWNSCALE_WGSL from '../gpu/shaders/raw-downscale.wgsl?raw';
@@ -245,6 +247,38 @@ export class ScopeController {
 
   get falseColorDiagnostics(): FalseColorDiagnostics {
     return this.falseColor.diagnostics;
+  }
+
+  /**
+   * Capture one live panel as an image.
+   *
+   * Re-renders the analysis texture the panel is currently showing (rather
+   * than re-uploading the video) so the export matches what the user sees, at
+   * a larger multiplier and with an export-specific ink palette.
+   */
+  async capturePanel(slot: number, settings: CaptureSettings): Promise<CaptureResult> {
+    if (this.destroyed) throw new Error('capture: controller destroyed');
+    const target = this.targets.find((t) => t.slot === slot);
+    if (!target) throw new Error('capture: panel not found');
+    const renderer = this.renderers.get(slot);
+    const analysis = this.signalMode === 'raw' ? this.rawDownscaler : this.downscaler;
+    if (!analysis) throw new Error('capture: no analysis texture yet');
+
+    const cssWidth = Math.max(1, Math.round(target.gpu.clientWidth));
+    const cssHeight = Math.max(1, Math.round(target.gpu.clientHeight));
+    const options = renderer ? renderer.options : this.optionsFor(slot, target.mode);
+
+    return renderPanelImage({
+      device: await getDevice(),
+      analysis,
+      options,
+      mode: target.mode,
+      cssWidth,
+      cssHeight,
+      gamuts: this.gamuts(),
+      settings,
+      sourceWidth: this.lastSampledVideo?.videoWidth,
+    });
   }
 
   async frame(video: HTMLVideoElement, force = false): Promise<void> {

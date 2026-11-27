@@ -12,6 +12,7 @@ import type { PrimariesId } from '../core/color/primaries';
 import type { RangeMode } from '../core/range-detector';
 import type { HdrMode, Unit } from '../core/scale/units';
 import type { Locale } from './i18n';
+import { DEFAULT_CAPTURE, type CaptureSettings } from '../core/scopes/capture-plan';
 
 export type Layout = 'single' | 'pair' | 'triple' | 'grid';
 
@@ -117,6 +118,8 @@ export interface HudState {
   panelOpacity: number;
   /** Graticule grid & label brightness multiplier (0.4..1.6). */
   graticuleBrightness: number;
+  /** Image export preferences (format, multiplier, background). */
+  capture: CaptureSettings;
   /** Global default trace coloring preference set from Settings ('default' | TraceColorMode). */
   defaultTraceMode?: 'default' | TraceColorMode;
   units: Unit;
@@ -209,6 +212,7 @@ export const DEFAULT_STATE: HudState = {
   probeConfig: { ...DEFAULT_PROBE_CONFIG },
   panelOpacity: 0.97,
   graticuleBrightness: 1.0,
+  capture: { ...DEFAULT_CAPTURE },
   defaultTraceMode: 'default',
   units: 'auto',
   gain: 0.9,
@@ -237,11 +241,16 @@ export async function loadSettings(): Promise<HudState> {
       ...DEFAULT_STATE,
       ...raw,
       probeConfig: { ...DEFAULT_PROBE_CONFIG, ...(raw.probeConfig ?? {}) },
+      capture: { ...DEFAULT_CAPTURE, ...(raw.capture ?? {}) },
       cells: raw.cells ?? {},
       panels: raw.panels ?? {},
     };
   } catch {
-    return { ...DEFAULT_STATE, probeConfig: { ...DEFAULT_PROBE_CONFIG } };
+    return {
+      ...DEFAULT_STATE,
+      probeConfig: { ...DEFAULT_PROBE_CONFIG },
+      capture: { ...DEFAULT_CAPTURE },
+    };
   }
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ANALYSIS_SIZES, analysisSize } from '../src/gpu/downscale';
+import { ANALYSIS_SIZES, MAX_ANALYSIS_EDGE, analysisSize } from '../src/gpu/downscale';
 
 describe('analysisSize', () => {
   it('scales 1080p landscape to 640x360 by default', () => {
@@ -60,5 +60,39 @@ describe('analysisSize', () => {
     const once = analysisSize(1920, 1080, 'default');
     const twice = analysisSize(once.width, once.height, 'default');
     expect(twice).toEqual(once);
+  });
+
+  describe('full preset', () => {
+    it('analyses 1080p at 1:1', () => {
+      expect(analysisSize(1920, 1080, 'full')).toEqual({ width: 1920, height: 1080 });
+    });
+
+    it('analyses 4K at 1:1', () => {
+      expect(analysisSize(3840, 2160, 'full')).toEqual({ width: 3840, height: 2160 });
+    });
+
+    it('analyses 8K at 1:1 (exactly the texture edge cap)', () => {
+      expect(analysisSize(7680, 4320, 'full')).toEqual({ width: 7680, height: 4320 });
+    });
+
+    it('keeps portrait 1:1', () => {
+      expect(analysisSize(1080, 1920, 'full')).toEqual({ width: 1080, height: 1920 });
+    });
+
+    it('does not upscale a source smaller than any preset', () => {
+      expect(analysisSize(320, 180, 'full')).toEqual({ width: 320, height: 180 });
+    });
+
+    it('clamps sources beyond the 8192 edge instead of failing texture creation', () => {
+      const s = analysisSize(15360, 8640, 'full');
+      expect(Math.max(s.width, s.height)).toBe(MAX_ANALYSIS_EDGE);
+      expect(Math.abs(s.width / s.height - 15360 / 8640)).toBeLessThan(0.01);
+    });
+
+    it('is strictly larger than native', () => {
+      const full = analysisSize(3840, 2160, 'full');
+      const native = analysisSize(3840, 2160, 'native');
+      expect(full.width * full.height).toBeGreaterThan(native.width * native.height);
+    });
   });
 });

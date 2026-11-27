@@ -29,6 +29,13 @@ export type HistChannelMode = 'Y' | 'RGB' | 'YRGB' | 'YUV';
 export type TraceColorMode = 'channel' | 'monochrome' | 'colorize' | 'hdr-zones' | 'green';
 export type ToneFilter = 'all' | 'shadows' | 'midtones' | 'highlights';
 
+/**
+ * Graticule ink set. `dark` is the tuned-for-panel look; `light` swaps in
+ * slate-on-white ink for exports (transparent or light paper backgrounds),
+ * where the panel palette would be nearly invisible.
+ */
+export type GraticuleTheme = 'dark' | 'light';
+
 export interface ScopeOptions {
   mode: ScopeMode;
   channel: 0 | 1 | 2 | 3;
@@ -65,6 +72,8 @@ export interface ScopeOptions {
   nitLow?: number;
   nitHigh?: number;
   graticuleBrightness?: number;
+  /** Ink set for graticule drawing. Defaults to the panel palette (`dark`). */
+  graticuleTheme?: GraticuleTheme;
   dpr: number;
 }
 
@@ -195,7 +204,12 @@ function toneFilterCode(t: ToneFilter | undefined): number {
   return 0;
 }
 
-function planesForOptions(o: ScopeOptions): number {
+/**
+ * How many accumulation planes the density buffer needs for these options.
+ * Exported so the image exporter can size its offscreen renderer against the
+ * device limits *before* allocating anything (see `planCapture`).
+ */
+export function planesForOptions(o: ScopeOptions): number {
   if (o.mode === 'histogram') return 4;
   const tm = traceModeCode(o);
   if (o.mode === 'vectorscope' || o.mode === 'cie') {

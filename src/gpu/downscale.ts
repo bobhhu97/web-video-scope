@@ -1,10 +1,24 @@
-export type AnalysisPreset = 'low' | 'default' | 'high' | 'ultra' | 'native';
+export type AnalysisPreset = 'low' | 'default' | 'high' | 'ultra' | 'native' | 'full';
 export type PrecisionMode = 'auto' | AnalysisPreset;
+
+/**
+ * The largest long edge we will ever analyse 1:1.
+ *
+ * 8192 is the smallest `maxTextureDimension2D` a conformant WebGPU adapter may
+ * report, so a source at or below this always fits. Anything wider (16K, 32K
+ * panoramas) is scaled down to this edge instead of failing texture creation.
+ */
+export const MAX_ANALYSIS_EDGE = 8192;
 
 /**
  * Long-edge pixel count per preset. Defining the long edge (not the height)
  * means portrait and landscape share one knob and the aspect ratio never
  * distorts. 640 long edge on 16:9 gives exactly 640x360.
+ *
+ * `full` means literally 1:1: for any source up to 8K the `long <= target`
+ * test wins and `analysisSize` returns the source resolution untouched. This
+ * costs GPU time and VRAM (an 8K rgba16float analysis texture is ~253 MB), so
+ * it is a deliberate manual override and never selected by the auto governor.
  */
 export const ANALYSIS_SIZES: Record<AnalysisPreset, number> = {
   low: 320,
@@ -12,6 +26,7 @@ export const ANALYSIS_SIZES: Record<AnalysisPreset, number> = {
   high: 854,
   ultra: 1280,
   native: 1920,
+  full: MAX_ANALYSIS_EDGE,
 };
 
 export const PRESET_MAX_PIXELS: Record<AnalysisPreset, number> = {
@@ -20,6 +35,8 @@ export const PRESET_MAX_PIXELS: Record<AnalysisPreset, number> = {
   high: 400_000,
   ultra: 950_000,
   native: 2_100_000,
+  // No second reduction: `ANALYSIS_SIZES.full` is already the hard edge cap.
+  full: Number.POSITIVE_INFINITY,
 };
 
 const MIN_DIM = 1;

@@ -82,18 +82,21 @@ describe('ITU-R BT.2100 HLG & PQ HDR transfer functions', () => {
 });
 
 describe('multi-tier analysis precision & 10-bit P010 raw planes', () => {
-  it('computes monotonically increasing analysis budgets across all 5 precision presets', () => {
+  it('computes monotonically increasing analysis budgets across all 6 precision presets', () => {
     const low = analysisSize(3840, 2160, 'low');
     const def = analysisSize(3840, 2160, 'default');
     const high = analysisSize(3840, 2160, 'high');
     const ultra = analysisSize(3840, 2160, 'ultra');
     const native = analysisSize(1920, 1080, 'native');
+    const full = analysisSize(3840, 2160, 'full');
 
     expect(low.width).toBe(320);
     expect(def.width).toBe(640);
     expect(high.width).toBeGreaterThan(def.width);
     expect(ultra.width).toBe(1280);
     expect(native).toEqual({ width: 1920, height: 1080 });
+    expect(full).toEqual({ width: 3840, height: 2160 });
+    expect(full.width * full.height).toBeGreaterThan(native.width * native.height);
   });
 
   it('splits 10-bit P010 buffers into 16-bit luma and interleaved UV views', () => {

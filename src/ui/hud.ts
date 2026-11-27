@@ -30,6 +30,12 @@ import {
   type Layout,
   type ProbeDisplayConfig,
 } from './settings';
+import {
+  DEFAULT_CAPTURE,
+  effectiveBackground,
+  planCapture,
+  type CaptureSettings,
+} from '../core/scopes/capture-plan';
 
 export interface PanelTargets {
   slot: number;
@@ -84,6 +90,8 @@ export interface HudHandlers {
   onClose(): void;
   onOpenPip(): void;
   onToggleLock(): void;
+  /** Save the given panel (or the active one) as an image. */
+  onCapture?(slot: number): void;
 }
 
 const HOST_ID = 'video-scopes-host';
@@ -345,6 +353,8 @@ const STYLE = `
     display: grid; grid-template-columns: 94px 1fr; gap: 6px; align-items: center;
   }
   .set-field > span { color: #95aab9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .set-hint { color: #6f8291; font-size: 10px; line-height: 1.45; }
+  .set-hint:empty { display: none; }
   .seg-btns { display: inline-flex; gap: 3px; }
   .check-grid {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
@@ -874,6 +884,40 @@ export class Hud {
               </div>
             </div>
           </div>
+          <div class="sec">
+            <div class="sec-title">${s.secCapture}</div>
+            <div class="set-grid">
+              <div class="set-field">
+                <span>${s.lblCaptureFormat}</span>
+                <select id="set-capture-format">
+                  <option value="png">PNG</option>
+                  <option value="jpeg">JPEG</option>
+                  <option value="webp">WebP</option>
+                </select>
+              </div>
+              <div class="set-field">
+                <span>${s.lblCaptureScale}</span>
+                <select id="set-capture-scale">
+                  <option value="1">1×</option>
+                  <option value="2">2×</option>
+                  <option value="3">3×</option>
+                  <option value="4">4×</option>
+                  <option value="match">${s.captureScaleMatch}</option>
+                </select>
+              </div>
+              <div class="set-field">
+                <span>${s.lblCaptureBackground}</span>
+                <select id="set-capture-background">
+                  <option value="transparent">${s.bgTransparent}</option>
+                  <option value="panel">${s.bgPanel}</option>
+                  <option value="white">${s.bgWhite}</option>
+                </select>
+              </div>
+            </div>
+            <div class="set-hint" id="capture-size-hint"></div>
+            <button id="capture-now-btn" type="button" class="active">${s.btnCapture}</button>
+            <div class="set-hint">${s.captureAccuracyHint}</div>
+          </div>
         </div>
         <div class="settings-foot">
           <button id="reset-all-btn" type="button" class="btn-danger">${s.btnResetAll}</button>
@@ -899,6 +943,7 @@ export class Hud {
           <span class="spacer"></span>
           <span class="badge mono" id="perf" title="Click to toggle governor lock">–</span>
           ${showPip ? `<button id="pip-btn" type="button" class="icon-btn" title="${s.pipTitle}">⧉</button>` : ''}
+          <button id="capture-btn" type="button" class="icon-btn" title="${s.btnCapture}">📷</button>
           <button id="lang-btn" type="button" class="icon-btn" title="Switch Language / 切换中英文">${langToggleText}</button>
           <button id="settings-btn" type="button" class="icon-btn" aria-pressed="false" title="${s.settingsTitle}">⚙</button>
           <button id="close" type="button" class="icon-btn" title="${s.closeTitle}">✕</button>
@@ -929,6 +974,7 @@ export class Hud {
               <option value="high">${s.precHigh}</option>
               <option value="ultra">${s.precUltra}</option>
               <option value="native">${s.precNative}</option>
+              <option value="full">${s.precFull}</option>
             </select>
             <select id="hdr-mode" title="Dynamic range & scale (Auto switches to HDR Nits on PQ/HLG)">
               <option value="auto">${s.hdrAuto}</option>
@@ -1085,7 +1131,8 @@ export class Hud {
         <option value="default">${s.precStd}</option>
         <option value="high">${s.precHigh}</option>
         <option value="ultra">${s.precUltra}</option>
-        <option value="native">${s.precNative}</option>`,
+        <option value="native">${s.precNative}</option>
+        <option value="full">${s.precFull}</option>`,
       );
       precSel.value = cur;
     }
@@ -1944,6 +1991,11 @@ export class Hud {
       set('set-panel-opacity', String(this.state.panelOpacity ?? 0.97));
       set('set-grat-bright', String(this.state.graticuleBrightness ?? 1));
       set('set-trace-mode', this.state.defaultTraceMode ?? 'default');
+      const cap = this.state.capture ?? DEFAULT_CAPTURE;
+      set('set-capture-format', cap.format);
+      set('set-capture-scale', String(cap.scale));
+      set('set-capture-background', cap.background);
+      this.renderCaptureSizeHint();
 
       const fcEnableChk = root.getElementById('set-fc-enable') as HTMLInputElement | null;
       if (fcEnableChk) fcEnableChk.checked = !!this.state.videoFalseColor;
@@ -1964,6 +2016,56 @@ export class Hud {
     } finally {
       this.syncing = false;
     }
+  }
+
+  /** Index of the panel currently marked active in the grid. */
+  private activeSlotIndex(): number {
+    const cells = resolveCells(this.state, this.state.layout);
+    return Math.min(cells.length - 1, Math.max(0, this.state.activeSlot || 0));
+  }
+
+  /** Last known source video width, used by the "match source" multiplier. */
+  private lastSourceWidth: number | undefined;
+
+  setSourceWidth(width: number | undefined): void {
+    this.lastSourceWidth = width && width > 0 ? width : undefined;
+    if (this.settingsOpen) this.renderCaptureSizeHint();
+  }
+
+  /**
+   * Show the pixel size the next snapshot will produce, so "3x" is not a
+   * mystery number and a clamped result is visible before it happens.
+   */
+  private renderCaptureSizeHint(): void {
+    const root = this.root;
+    if (!root) return;
+    const hint = root.getElementById('capture-size-hint');
+    if (!hint) return;
+    const slot = this.activeSlotIndex();
+    const target = this.targets.find((t) => t.slot === slot) ?? this.targets[0];
+    if (!target) {
+      hint.textContent = '';
+      return;
+    }
+    const cssW = Math.max(1, Math.round(target.gpu.clientWidth));
+    const cssH = Math.max(1, Math.round(target.gpu.clientHeight));
+    const capture = this.state.capture ?? DEFAULT_CAPTURE;
+    const plan = planCapture({
+      cssWidth: cssW,
+      cssHeight: cssH,
+      scale: capture.scale,
+      sourceWidth: this.lastSourceWidth,
+      mode: target.mode,
+      planes: 4,
+      wavePad: WAVE_PAD,
+      // Conservative defaults until the device is queried; the exporter
+      // re-plans against the real limits, so this hint never over-promises.
+      maxEdge: 8192,
+      maxDensityBytes: 128 * 1024 * 1024,
+    });
+    const size = `${plan.width} × ${plan.height}`;
+    const label = capture.scale === 'match' ? 'match' : `${capture.scale}×`;
+    hint.textContent = plan.clamped ? `${size} (${label} · GPU limit)` : `${size} (${label})`;
   }
 
   private wireSettingsSheet(): void {
@@ -2107,6 +2209,34 @@ export class Hud {
       });
     }
 
+    const setCapture = (patch: Partial<CaptureSettings>): void => {
+      const capture: CaptureSettings = { ...(this.state.capture ?? DEFAULT_CAPTURE), ...patch };
+      this.state = { ...this.state, capture };
+      this.renderCaptureSizeHint();
+      this.syncSettingsModal();
+      this.handlers.onStateChange({ capture });
+    };
+
+    bindSet('set-capture-format', 'change', (el) => {
+      const format = el.value as CaptureSettings['format'];
+      const capture = { ...(this.state.capture ?? DEFAULT_CAPTURE), format };
+      // A transparent plate cannot be stored in JPEG; show what will happen.
+      const background = effectiveBackground(format, capture.background);
+      setCapture({ format, background });
+    });
+    bindSet('set-capture-scale', 'change', (el) => {
+      const raw = el.value;
+      const scale: CaptureSettings['scale'] = raw === 'match' ? 'match' : (Number(raw) as 1 | 2 | 3 | 4);
+      setCapture({ scale });
+    });
+    bindSet('set-capture-background', 'change', (el) => {
+      setCapture({ background: el.value as CaptureSettings['background'] });
+    });
+
+    root.getElementById('capture-now-btn')?.addEventListener('click', () => {
+      this.handlers.onCapture?.(this.activeSlotIndex());
+    });
+
     root.getElementById('reset-all-btn')?.addEventListener('click', () => {
       const keepLang = this.state.lang;
       const keepPos = this.state.hostPosition;
@@ -2134,6 +2264,15 @@ export class Hud {
     root.getElementById('close')?.addEventListener('click', () => this.handlers.onClose());
     root.getElementById('pip-btn')?.addEventListener('click', () => this.handlers.onOpenPip());
     root.getElementById('perf')?.addEventListener('click', () => this.handlers.onToggleLock());
+
+    root.getElementById('capture-btn')?.addEventListener('click', (e: Event) => {
+      // Shift/Alt captures only the panel under the pointer's cell selection;
+      // otherwise the active cell. Same handler either way, different slot.
+      const slot = (e as MouseEvent).shiftKey || (e as MouseEvent).altKey
+        ? this.activeSlotIndex()
+        : 0;
+      this.handlers.onCapture?.(slot);
+    });
 
     root.getElementById('lang-btn')?.addEventListener('click', () => {
       const lang: Locale = (this.state.lang ?? 'en') === 'zh' ? 'en' : 'zh';

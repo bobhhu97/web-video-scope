@@ -41,6 +41,7 @@ import {
 import { GpuTimer } from '../core/gpu-timer';
 import { getDevice } from '../gpu/device';
 import type { AnalysisPreset } from '../gpu/downscale';
+import type { CaptureSettings } from '../core/scopes/capture-plan';
 import { CursorProbeTooltip, Probe, formatSample, type ProbeSample } from '../ui/probe';
 import { openFloatingWindow, pipSupported, type FloatingWindow } from '../ui/pip';
 import { videoReadability, readabilityNotice, type Readability } from './readability';
@@ -218,9 +219,17 @@ function analysisPreset(): AnalysisPreset {
   return TIER_DESCRIPTION[currentTier()].preset;
 }
 
+/**
+ * Heavy analysis presets pay for themselves only if the sampling cadence keeps
+ * up with the source, so they get a floor of 30 fps even when the governor has
+ * walked the tier down. `full` belongs here: on a 4K source it is 4x the pixels
+ * of `native`, and sampling it at 15 fps makes the trace visibly stale.
+ */
+const HEAVY_PRECISION: ReadonlySet<string> = new Set(['ultra', 'native', 'full']);
+
 function applyTier(tier: QualityTier): void {
   const d = TIER_DESCRIPTION[tier];
-  const fps = state.precision === 'ultra' || state.precision === 'native' ? Math.max(30, d.fps) : d.fps;
+  const fps = HEAVY_PRECISION.has(state.precision) ? Math.max(30, d.fps) : d.fps;
   loop?.setTargetFps(fps);
   controller?.setMinInterval(1000 / fps);
   void saveSettings(state);
@@ -295,6 +304,7 @@ function refreshHud(): void {
           ? 'limited'
           : 'full';
   activeHud()?.setState(state);
+  activeHud()?.setSourceWidth(detector?.video?.videoWidth);
   activeHud()?.setColorInfo(colorInfo);
   activeHud()?.setDiagnosis(
     {
@@ -484,6 +494,9 @@ function buildController(): void {
     get dims() {
       return controller?.analysisDims ?? null;
     },
+    get precision() {
+      return state.precision;
+    },
     get transfer() {
       return currentEffectiveTransfer();
     },
@@ -502,6 +515,11 @@ function buildController(): void {
         preset: state.falseColorPreset ?? 'auto',
         ...(controller?.falseColorDiagnostics ?? {}),
       };
+    },
+    /** Used by scripts/verify-capture.mjs; also handy when debugging exports. */
+    capture(slot: number, overrides?: Partial<CaptureSettings>) {
+      if (!controller) throw new Error('capture: controller not ready');
+      return controller.capturePanel(slot, { ...state.capture, ...overrides });
     },
   };
   controller.onRawError = (msg) => activeHud()?.setNotice(`Raw mode unavailable: ${msg}`);
@@ -669,6 +687,27 @@ function buildHandlers(): HudHandlers {
     },
     onOpenPip() {
       void detachToFloatingWindow();
+    },
+    async onCapture(slot: number) {
+      const hud = activeHud();
+      if (!hud || !controller) return;
+      hud.setNotice(t(state.lang).captureBusy);
+      try {
+        const result = await controller.capturePanel(slot, state.capture);
+        const url = URL.createObjectURL(result.blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = result.fileName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Revoke on the next macrotask so Chrome has picked up the download.
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        hud.setNotice(t(state.lang).captureSaved);
+      } catch (err) {
+        console.warn('[video-scopes] snapshot failed', err);
+        hud.setNotice(t(state.lang).captureFailed);
+      }
     },
     onToggleLock() {
       const locked = state.lockedTier === null;

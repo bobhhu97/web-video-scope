@@ -24,7 +24,8 @@ chrome://extensions → Developer mode → Load unpacked → unzipped folder →
 
 - [What it measures](#what-it-measures) — the five scopes and how to read them
 - [How it reads the signal](#how-it-reads-the-signal) — one code-value axis, range detection, false colour
-- [Performance](#performance) — zero-copy upload, fixed analysis size, adaptive governor
+- [Performance](#performance) — zero-copy upload, analysis resolution, adaptive governor
+- [Snapshots](#snapshots) — export a panel as PNG/JPEG/WebP
 - [Install & use](#install)
 - [Development & verification](#development)
 - [Architecture](#architecture)
@@ -112,10 +113,28 @@ Roughly 9–10× less time in the upload step, and nothing copied. The copy path
 stays as the fallback for cross-origin video, where import throws a
 `SecurityError`.
 
-**Fixed analysis resolution.** Each frame is downscaled once to a 640-pixel long
-edge (640×360 for 16:9) and that single texture feeds every scope. Cost is
-therefore independent of source resolution — the 4K version of a frame costs the
-same as the 720p one.
+**One downscale per frame, fed to every scope.** Each frame is scaled once and
+that single texture feeds all scopes, so cost does not multiply with the number
+of panels. The long edge is a preset you pick in the toolbar:
+
+| Preset | Long edge | Use it for |
+| --- | --- | --- |
+| Eco | 320 px | crowded pages, weak GPUs |
+| Std | 640 px | default; the balance point |
+| High | 854 px | finer waveform detail |
+| Ultra | 1280 px | near-source analysis |
+| Native | 1920 px | 1:1 with 1080p footage |
+| Full | source | 1:1 with any source, capped at 8192 px |
+
+`Full` is exactly 1:1 — a 4K source is analysed at 3840×2160. That is 4× the
+pixels of `Native`, so it is never chosen automatically: the adaptive governor's
+tiers top out at `high`, and picking `Full` explicitly also pins the frame rate
+to at least 30 fps so traces do not lag behind playback. Measured GPU time for a
+single waveform at 1:1 is 0.63 ms (4K) — the 4 ms budget covers roughly four
+panels before the frame rate has to give. The ceiling is the device, not the
+shader: analysis textures are capped at `maxTextureDimension2D` (8192 px in the
+WebGPU spec minimum, so 16K/32K sources clamp rather than fail) and the density
+buffer at `maxStorageBufferBindingSize`.
 
 **Frame-driven, not timer-driven.** `requestVideoFrameCallback` means the scopes
 advance when the video does, and cost nothing while paused.
@@ -132,6 +151,36 @@ scopes open on a 1080p source, zero-copy upload confirmed.
 All of it runs on WebGPU, which on macOS is Metal. There is no separate Metal
 integration to add: the import, the compute gathers and the resolve passes are
 already Metal work.
+
+## Snapshots
+
+The camera button in the header saves the active panel as an image. Unlike a
+screen grab, it does not copy the visible canvas: it re-renders the current
+analysis texture off-screen at the chosen multiplier and repaints the graticule
+on top, so a 4x export is genuinely 4x rather than an upscaled bitmap.
+
+Choose format, resolution and background in **Settings → Panel Snapshot**:
+
+- **Format** — PNG (lossless, keeps alpha), JPEG (small, no alpha), WebP (both).
+- **Resolution** — 1x / 2x / 3x / 4x, or **match source** to size the export to
+  the video's own width. The panel geometry (axis margins, graticule labels,
+  vectorscope ring) scales with the multiplier, so ticks stay proportionally
+  sized instead of turning into hairlines at 4x.
+- **Background** — **Transparent** for compositing into a slide or an edit,
+  **panel gray** to match what you see on screen, or **white** for print.
+
+Transparent PNGs are the intended path for dropping a scope into a document:
+the trace and graticule carry alpha, and the graticule switches to a dark-on-
+transparent palette so it stays legible without the panel behind it. JPEG cannot
+store alpha, so that combination silently falls back to a white plate rather
+than producing an unreadable file.
+
+Two things worth knowing. First, **export resolution is not analysis
+precision** — the trace is whatever the analysis texture holds, magnified. For
+true per-pixel detail set the precision preset to `Full 1:1` before capturing.
+Second, the multiplier is clamped to the GPU's texture and storage-buffer
+limits; when that happens the settings sheet shows the reduced size and the
+saved image reports `clamped` instead of silently downscaling.
 
 ## Install
 
@@ -178,6 +227,7 @@ pnpm verify:e2e        # injects the built content script on a live <video> — 
 pnpm verify:ui         # panel layout, geometry, IRE axis — 15 checks
 pnpm verify:scatter    # vectorscope + CIE point clouds, locus, fill — 12 checks
 pnpm verify:cie        # CIE 1:1 axes, grid squareness, zoom, pickers — 12 checks
+pnpm verify:capture    # snapshot export: alpha, opacity, size, graticule — 13 checks
 pnpm bench:upload      # zero-copy vs copying upload
 pnpm capture:readme    # regenerate every image in this document
 ```
