@@ -114,27 +114,42 @@ stays as the fallback for cross-origin video, where import throws a
 `SecurityError`.
 
 **One downscale per frame, fed to every scope.** Each frame is scaled once and
-that single texture feeds all scopes, so cost does not multiply with the number
-of panels. The long edge is a preset you pick in the toolbar:
+that single texture feeds all scopes, so the upload and scale cost does not
+multiply with the number of panels — only the per-scope accumulate pass does.
+Each preset sets a *target* long edge, and a per-preset pixel budget shrinks
+the result further if the target would overshoot it. Both numbers matter, so
+here is what a 16:9 source actually gets:
 
-| Preset | Long edge | Use it for |
-| --- | --- | --- |
-| Eco | 320 px | crowded pages, weak GPUs |
-| Std | 640 px | default; the balance point |
-| High | 854 px | finer waveform detail |
-| Ultra | 1280 px | near-source analysis |
-| Native | 1920 px | 1:1 with 1080p footage |
-| Full | source | 1:1 with any source, capped at 8192 px |
+| Preset | Target long edge | Pixel cap | 16:9 result | Use it for |
+| --- | --- | --- | --- | --- |
+| Eco | 320 px | 0.4 MP | 320×180 | crowded pages, weak GPUs |
+| Std | 640 px | 0.4 MP | 640×360 | default; the balance point |
+| High | 854 px | 0.4 MP | **843×474** | finer waveform detail |
+| Ultra | 1280 px | 0.95 MP | 1280×720 | near-source analysis |
+| Native | 1920 px | 2.1 MP | 1920×1080 | 1:1 with 1080p footage |
+| Full | source | none | 1920×1080 … 8192×4608 | 1:1 with any source |
 
-`Full` is exactly 1:1 — a 4K source is analysed at 3840×2160. That is 4× the
-pixels of `Native`, so it is never chosen automatically: the adaptive governor's
-tiers top out at `high`, and picking `Full` explicitly also pins the frame rate
-to at least 30 fps so traces do not lag behind playback. Measured GPU time for a
-single waveform at 1:1 is 0.63 ms (4K) — the 4 ms budget covers roughly four
-panels before the frame rate has to give. The ceiling is the device, not the
-shader: analysis textures are capped at `maxTextureDimension2D` (8192 px in the
-WebGPU spec minimum, so 16K/32K sources clamp rather than fail) and the density
-buffer at `maxStorageBufferBindingSize`.
+`High` is the one row where the cap binds: 854×480 would be 410 k pixels, over
+the 400 k budget, so it settles at 843×474.
+
+`Full` is the only preset with no pixel cap, so it really is 1:1 — a 4K source
+is analysed at 3840×2160, verified against the live device. It is also the only
+preset that scales with the source: everything below it produces the same
+analysis texture for a 1080p and a 4K source. That makes `Full` 4× the pixels of
+`Native` at 4K, so it is never chosen automatically — the governor's tiers top
+out at `high` — and picking it explicitly pins the frame rate to at least 30 fps
+so traces do not lag behind playback.
+
+The ceiling is the device, not the shader. Analysis textures are capped at
+`maxTextureDimension2D` (8192 in the WebGPU spec minimum, so 16K/32K sources
+clamp rather than fail), and the density buffer at `maxStorageBufferBindingSize`.
+Cost rises with it: measured end-to-end at 4K on this machine, one waveform at
+`Full` reports 4.3 ms and four panels 6.1 ms, against 3.2 ms for the same single
+panel at `Native`. Those figures come from the on-screen budget readout, which
+times `onSubmittedWorkDone` — an upper bound that includes compositor work, and
+the number the governor acts on. At 8K `Full`, four panels reach 21.7 ms: it
+still renders correctly, it just misses the 4 ms budget, so `Full` wants a
+smaller layout or a faster GPU.
 
 **Frame-driven, not timer-driven.** `requestVideoFrameCallback` means the scopes
 advance when the video does, and cost nothing while paused.
@@ -220,7 +235,7 @@ working in fullscreen.
 ## Development
 
 ```bash
-pnpm test              # unit tests (vitest) — 290 tests
+pnpm test              # unit tests (vitest) — 311 tests
 pnpm build             # production bundle
 pnpm verify:manifest   # manifest, CSP and bundle integrity — 31 checks
 pnpm verify:e2e        # injects the built content script on a live <video> — 24 checks
@@ -272,8 +287,8 @@ core (pure, unit tested)
 
 gpu
 ├── external-source          importExternalTexture wrapper (zero-copy upload)
-├── downscale-external.wgsl  external texture -> fixed analysis texture
-├── downscale.wgsl           copied source -> fixed analysis texture (fallback)
+├── downscale-external.wgsl  external texture -> analysis texture (preset-sized)
+├── downscale.wgsl           copied source -> analysis texture (preset-sized, fallback)
 ├── accumulate.wgsl          compute: pixel -> atomic density bins
 └── resolve.wgsl             phosphor transfer + composite to a transparent canvas
 ```
