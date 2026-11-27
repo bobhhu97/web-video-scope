@@ -26,10 +26,13 @@ import {
   PANEL_BG,
   PAPER_BG,
   captureFileName,
+  captureSheetFileName,
   effectiveBackground,
   formatInfo,
   graticuleThemeFor,
   planCapture,
+  planCaptureLayout,
+  type CaptureGrid,
   type CaptureSettings,
 } from '../core/scopes/capture-plan';
 
@@ -90,6 +93,181 @@ function toBlob(
       quality,
     );
   });
+}
+
+export interface CaptureSheetRequest {
+  device: GPUDevice;
+  /** Analysis texture the live panels are currently showing. */
+  analysis: AnalysisTexture;
+  gamuts: readonly PrimariesId[];
+  settings: CaptureSettings;
+  /** Grid shape to lay the cells out in. */
+  grid: CaptureGrid;
+  /** One entry per exported cell, in reading order. */
+  panels: {
+    slot: number;
+    mode: ScopeMode;
+    /** Live renderer options for this cell. */
+    options: ScopeOptions;
+    /** Panel size in CSS pixels. */
+    cssWidth: number;
+    cssHeight: number;
+  }[];
+  sourceWidth?: number;
+  /** Gutter between cells, in CSS pixels of one cell. */
+  gap?: number;
+}
+
+/**
+ * Render each cell into its own `OffscreenCanvas`.
+ *
+ * One canvas per cell, not one big canvas: a `GPUCanvasContext` hands out a
+ * single `getCurrentTexture()`, so several renderers writing into one context
+ * would overwrite each other. Separate targets also keep each cell's density
+ * buffer independent, which is what lets a 4-up sheet hold four scopes at once.
+ */
+async function renderCellBitmap(
+  device: GPUDevice,
+  analysis: AnalysisTexture,
+  options: ScopeOptions,
+  width: number,
+  height: number,
+  dpr: number,
+): Promise<{ bitmap: ImageBitmap; done: () => void }> {
+  const offscreen = new OffscreenCanvas(width, height);
+  const context = offscreen.getContext('webgpu');
+  if (!context) throw new Error('WebGPU offscreen context unavailable');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  context.configure({ device, format, alphaMode: 'premultiplied' });
+
+  const gpu: CanvasGpu = { device, context, format };
+  const renderer = new ScopeRenderer(gpu, { ...options, width, height, dpr });
+  try {
+    const encoder = device.createCommandEncoder();
+    renderer.encode(encoder, analysis, false);
+    device.queue.submit([encoder.finish()]);
+    // The canvas only holds the resolved pixels once the queue drains;
+    // without this the bitmap can come back blank on slow GPUs.
+    await device.queue.onSubmittedWorkDone();
+    const bitmap = await createImageBitmap(offscreen);
+    return {
+      bitmap,
+      done: () => {
+        bitmap.close();
+        renderer.destroy();
+        context.unconfigure();
+      },
+    };
+  } catch (error) {
+    renderer.destroy();
+    context.unconfigure();
+    throw error;
+  }
+}
+
+/** Composite one cell's GPU bitmap and its graticule into a sheet context. */
+function blitCell(
+  ctx: CanvasRenderingContext2D,
+  bitmap: ImageBitmap,
+  cell: { x: number; y: number; width: number; height: number; cssWidth: number; cssHeight: number },
+  options: ScopeOptions,
+  scale: number,
+  gamuts: readonly PrimariesId[],
+): void {
+  ctx.drawImage(bitmap, cell.x, cell.y);
+
+  // The graticule painters start with `clearRect` (they own the live overlay
+  // canvas outright), so they cannot draw straight onto the composite or they
+  // would erase the trace underneath. Paint them on their own layer and
+  // composite that with plain source-over.
+  const { canvas: gratCanvas, ctx: gratCtx } = canvas2d(cell.width, cell.height);
+  gratCtx.setTransform(scale, 0, 0, scale, 0, 0);
+  drawGraticule(
+    gratCtx,
+    { ...options, width: cell.cssWidth, height: cell.cssHeight, dpr: scale },
+    gamuts,
+  );
+  ctx.drawImage(gratCanvas, cell.x, cell.y);
+}
+
+/**
+ * Render the whole visible layout to one image.
+ *
+ * Every cell is re-rendered from the shared analysis texture with its own live
+ * options (mode, channel, zoom, pan, gain, gamma...), so the sheet reproduces
+ * exactly what the panel shows rather than a scaled-up screenshot.
+ */
+export async function renderSheetImage(req: CaptureSheetRequest): Promise<CaptureResult> {
+  const background = effectiveBackground(req.settings.format, req.settings.background);
+  const theme = graticuleThemeFor(background);
+  const gap = req.gap ?? 0;
+
+  const baseOptions = req.panels.map((panel) => ({
+    ...panel.options,
+    mode: panel.mode,
+    graticuleTheme: theme,
+  }));
+
+  const plan = planCaptureLayout({
+    limits: {
+      maxEdge: req.device.limits.maxTextureDimension2D,
+      maxDensityBytes: req.device.limits.maxStorageBufferBindingSize,
+    },
+    slots: req.panels.map((p) => p.slot),
+    grid: req.grid,
+    cells: req.panels.map((panel, i) => ({
+      cssWidth: panel.cssWidth,
+      cssHeight: panel.cssHeight,
+      mode: panel.mode,
+      planes: planesForOptions(baseOptions[i]!),
+    })),
+    scale: req.settings.scale,
+    sourceWidth: req.sourceWidth,
+    wavePad: WAVE_PAD,
+    gap,
+  });
+
+  const { canvas: out, ctx } = canvas2d(plan.width, plan.height);
+  if (background === 'panel') {
+    ctx.fillStyle = PANEL_BG;
+    ctx.fillRect(0, 0, plan.width, plan.height);
+  } else if (background === 'white') {
+    ctx.fillStyle = PAPER_BG;
+    ctx.fillRect(0, 0, plan.width, plan.height);
+  }
+
+  // Sequential per cell: an export is a one-shot action, so a few extra queue
+  // round-trips cost nothing, while keeping each cell's setup and teardown
+  // self-contained.
+  for (let i = 0; i < plan.cells.length; i += 1) {
+    const cell = plan.cells[i]!;
+    const options = baseOptions[i]!;
+    const rendered = await renderCellBitmap(
+      req.device,
+      req.analysis,
+      options,
+      cell.width,
+      cell.height,
+      plan.scale,
+    );
+    try {
+      blitCell(ctx, rendered.bitmap, cell, options, plan.scale, req.gamuts);
+    } finally {
+      rendered.done();
+    }
+  }
+
+  const info = formatInfo(req.settings.format);
+  const blob = await toBlob(out, info.mime, info.quality);
+  return {
+    blob,
+    fileName: captureSheetFileName(req.grid, new Date(), req.settings.format),
+    width: plan.width,
+    height: plan.height,
+    scale: plan.scale,
+    clamped: plan.clamped,
+    requestedScale: plan.requestedScale,
+  };
 }
 
 /**

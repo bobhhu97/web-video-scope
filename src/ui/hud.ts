@@ -33,7 +33,7 @@ import {
 import {
   DEFAULT_CAPTURE,
   effectiveBackground,
-  planCapture,
+  planCaptureLayout,
   type CaptureSettings,
 } from '../core/scopes/capture-plan';
 
@@ -90,8 +90,11 @@ export interface HudHandlers {
   onClose(): void;
   onOpenPip(): void;
   onToggleLock(): void;
-  /** Save the given panel (or the active one) as an image. */
-  onCapture?(slot: number): void;
+  /**
+   * Save a snapshot. With a slot, only that panel; without, the whole layout
+   * exactly as it is currently arranged on screen.
+   */
+  onCapture?(slot?: number): void;
 }
 
 const HOST_ID = 'video-scopes-host';
@@ -2041,31 +2044,38 @@ export class Hud {
     if (!root) return;
     const hint = root.getElementById('capture-size-hint');
     if (!hint) return;
-    const slot = this.activeSlotIndex();
-    const target = this.targets.find((t) => t.slot === slot) ?? this.targets[0];
-    if (!target) {
+    const panels = [...this.targets].sort((a, b) => a.slot - b.slot);
+    if (panels.length === 0) {
       hint.textContent = '';
       return;
     }
-    const cssW = Math.max(1, Math.round(target.gpu.clientWidth));
-    const cssH = Math.max(1, Math.round(target.gpu.clientHeight));
     const capture = this.state.capture ?? DEFAULT_CAPTURE;
-    const plan = planCapture({
-      cssWidth: cssW,
-      cssHeight: cssH,
+    const plan = planCaptureLayout({
+      slots: panels.map((p) => p.slot),
+      grid: this.state.layout,
+      cells: panels.map((p) => ({
+        cssWidth: Math.max(1, Math.round(p.gpu.clientWidth)),
+        cssHeight: Math.max(1, Math.round(p.gpu.clientHeight)),
+        mode: p.mode,
+        planes: 4,
+      })),
       scale: capture.scale,
       sourceWidth: this.lastSourceWidth,
-      mode: target.mode,
-      planes: 4,
       wavePad: WAVE_PAD,
+      gap: 3,
       // Conservative defaults until the device is queried; the exporter
       // re-plans against the real limits, so this hint never over-promises.
-      maxEdge: 8192,
-      maxDensityBytes: 128 * 1024 * 1024,
+      limits: {
+        maxEdge: 8192,
+        maxDensityBytes: 128 * 1024 * 1024,
+      },
     });
     const size = `${plan.width} × ${plan.height}`;
     const label = capture.scale === 'match' ? 'match' : `${capture.scale}×`;
-    hint.textContent = plan.clamped ? `${size} (${label} · GPU limit)` : `${size} (${label})`;
+    const shape = `${plan.cols}×${plan.rows}`;
+    hint.textContent = plan.clamped
+      ? `${size} ${shape} (${label} · GPU limit)`
+      : `${size} ${shape} (${label})`;
   }
 
   private wireSettingsSheet(): void {
@@ -2234,7 +2244,7 @@ export class Hud {
     });
 
     root.getElementById('capture-now-btn')?.addEventListener('click', () => {
-      this.handlers.onCapture?.(this.activeSlotIndex());
+      this.handlers.onCapture?.();
     });
 
     root.getElementById('reset-all-btn')?.addEventListener('click', () => {
@@ -2266,12 +2276,10 @@ export class Hud {
     root.getElementById('perf')?.addEventListener('click', () => this.handlers.onToggleLock());
 
     root.getElementById('capture-btn')?.addEventListener('click', (e: Event) => {
-      // Shift/Alt captures only the panel under the pointer's cell selection;
-      // otherwise the active cell. Same handler either way, different slot.
-      const slot = (e as MouseEvent).shiftKey || (e as MouseEvent).altKey
-        ? this.activeSlotIndex()
-        : 0;
-      this.handlers.onCapture?.(slot);
+      // Plain click exports the whole layout (4-up in quad, one row in triple);
+      // Shift/Alt narrows it to just the active panel.
+      const single = (e as MouseEvent).shiftKey || (e as MouseEvent).altKey;
+      this.handlers.onCapture?.(single ? this.activeSlotIndex() : undefined);
     });
 
     root.getElementById('lang-btn')?.addEventListener('click', () => {

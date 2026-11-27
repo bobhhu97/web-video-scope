@@ -9,6 +9,16 @@
 
 import type { ScopeMode } from '../../gpu/scope-renderer';
 
+/**
+ * Grid shape an export lays the cells out in, as `columns × rows`.
+ *
+ * Deliberately not the HUD's `Layout` union: `src/core` must not depend on
+ * `src/ui`, and the export grid is not always the on-screen one. Three panels
+ * are stacked vertically on screen but exported side by side, which is what
+ * `triple` means here.
+ */
+export type CaptureGrid = 'single' | 'pair' | 'triple' | 'grid';
+
 /** File container written by the exporter. */
 export type CaptureFormat = 'png' | 'jpeg' | 'webp';
 
@@ -199,4 +209,173 @@ export function captureFileName(mode: ScopeMode, at: Date, format: CaptureFormat
 /** Human-readable size, e.g. `3840 × 2160`. */
 export function describeSize(width: number, height: number): string {
   return `${width} × ${height}`;
+}
+
+/** Columns and rows a capture grid lays out, in reading order. */
+export function captureGridShape(grid: CaptureGrid): { cols: number; rows: number; cells: number } {
+  switch (grid) {
+    case 'pair':
+      return { cols: 2, rows: 1, cells: 2 };
+    case 'triple':
+      // Stacked 1×3 on screen, but a wide strip reads far better as an export.
+      return { cols: 3, rows: 1, cells: 3 };
+    case 'grid':
+      return { cols: 2, rows: 2, cells: 4 };
+    default:
+      return { cols: 1, rows: 1, cells: 1 };
+  }
+}
+
+/** Layout of one cell inside a multi-cell export, in output pixels. */
+export interface CaptureCell {
+  slot: number;
+  /** Top-left corner in output pixels. */
+  x: number;
+  y: number;
+  /** Cell size in output pixels (already multiplied). */
+  width: number;
+  height: number;
+  /** Cell size in CSS pixels — handed to `ScopeRenderer` as width/height. */
+  cssWidth: number;
+  cssHeight: number;
+}
+
+export interface CaptureLayoutPlan extends CapturePlan {
+  cols: number;
+  rows: number;
+  cells: CaptureCell[];
+}
+
+export interface CaptureLayoutRequest {
+  limits: CaptureLimits;
+  /** Slot numbers to export, in reading order (row-major). */
+  slots: number[];
+  grid: CaptureGrid;
+  /** Per-cell panel size in CSS pixels, indexed the same as `slots`. */
+  cells: { cssWidth: number; cssHeight: number; mode: ScopeMode; planes: number }[];
+  scale: CaptureScale;
+  sourceWidth?: number;
+  wavePad: { top: number; right: number; bottom: number; left: number };
+  /** Gutter between cells, in CSS pixels of a single cell. */
+  gap: number;
+}
+
+/**
+ * Plan a whole-layout export: every cell rendered at the same multiplier, laid
+ * out on a shared grid, with one gutter colour behind them.
+ *
+ * The multiplier is a single number for the whole sheet, so the cells keep
+ * their relative sizes and the gutters stay uniform. It is clamped by the
+ * tightest cell — one 4K-capable cell must not make a 4-up sheet exceed the
+ * device limits elsewhere.
+ */
+export function planCaptureLayout(req: CaptureLayoutRequest): CaptureLayoutPlan {
+  const shape = captureGridShape(req.grid);
+  const n = Math.min(shape.cells, req.slots.length, req.cells.length);
+
+  if (n === 0) {
+    return {
+      ...planCapture({
+        ...req.limits,
+        cssWidth: 1,
+        cssHeight: 1,
+        scale: req.scale,
+        mode: 'waveform-luma',
+        planes: 1,
+        wavePad: req.wavePad,
+      }),
+      cols: shape.cols,
+      rows: shape.rows,
+      cells: [],
+    };
+  }
+
+  const taken = req.cells.slice(0, n);
+
+  // Each cell would fit on its own; the sheet is limited by whichever cell
+  // forces the tile size to shrink first, so clamp against the worst one.
+  let scale = Infinity;
+  for (const cell of taken) {
+    const one = planCapture({
+      ...req.limits,
+      cssWidth: cell.cssWidth,
+      cssHeight: cell.cssHeight,
+      scale: req.scale,
+      sourceWidth: req.sourceWidth,
+      mode: cell.mode,
+      planes: cell.planes,
+      wavePad: req.wavePad,
+    });
+    scale = Math.min(scale, one.scale);
+  }
+  if (!Number.isFinite(scale)) scale = 1;
+  scale = Math.max(0.05, scale);
+
+  const first = taken[0]!;
+  const requested =
+    req.scale === 'match'
+      ? Math.max(0.1, (req.sourceWidth ?? first.cssWidth) / first.cssWidth)
+      : (req.scale as number);
+
+  // Uniform tile in CSS pixels: the largest cell drives the tile so no cell is
+  // letterboxed; smaller cells centre inside it.
+  const tileCssW = Math.max(...taken.map((c) => c.cssWidth));
+  const tileCssH = Math.max(...taken.map((c) => c.cssHeight));
+  const gapPx = Math.max(0, Math.round(req.gap * scale));
+
+  const totalW = shape.cols * Math.round(tileCssW * scale) + gapPx * (shape.cols + 1);
+  const totalH = shape.rows * Math.round(tileCssH * scale) + gapPx * (shape.rows + 1);
+
+  // Re-check the assembled sheet against the edge limit: rounding and the
+  // gutters can push a 4-cell sheet past `maxEdge` even when each cell fits.
+  const edgeFit = Math.min(1, req.limits.maxEdge / Math.max(1, totalW), req.limits.maxEdge / Math.max(1, totalH));
+  if (edgeFit < 1) {
+    scale = Math.max(0.05, scale * edgeFit * 0.98);
+  }
+
+  const cellW = Math.max(1, Math.round(tileCssW * scale));
+  const cellH = Math.max(1, Math.round(tileCssH * scale));
+  const finalGap = Math.max(0, Math.round(req.gap * scale));
+  const width = Math.max(1, Math.min(req.limits.maxEdge, shape.cols * cellW + finalGap * (shape.cols + 1)));
+  const height = Math.max(1, Math.min(req.limits.maxEdge, shape.rows * cellH + finalGap * (shape.rows + 1)));
+
+  const cells: CaptureCell[] = taken.map((cell, i) => {
+    const col = i % shape.cols;
+    const row = Math.floor(i / shape.cols);
+    const cw = Math.max(1, Math.round(cell.cssWidth * scale));
+    const ch = Math.max(1, Math.round(cell.cssHeight * scale));
+    // Centre a smaller cell inside its tile.
+    const x = finalGap + col * (cellW + finalGap) + Math.floor((cellW - cw) / 2);
+    const y = finalGap + row * (cellH + finalGap) + Math.floor((cellH - ch) / 2);
+    return {
+      slot: req.slots[i]!,
+      x,
+      y,
+      width: cw,
+      height: ch,
+      cssWidth: cell.cssWidth,
+      cssHeight: cell.cssHeight,
+    };
+  });
+
+  return {
+    cssWidth: tileCssW,
+    cssHeight: tileCssH,
+    scale,
+    width,
+    height,
+    clamped: scale < requested - 1e-6,
+    requestedScale: requested,
+    cols: shape.cols,
+    rows: shape.rows,
+    cells,
+  };
+}
+
+/** File name for a whole-sheet export, e.g. `scopes-grid-20260102-030405.png`. */
+export function captureSheetFileName(grid: CaptureGrid, at: Date, format: CaptureFormat): string {
+  const stamp =
+    `${at.getFullYear()}${pad2(at.getMonth() + 1)}${pad2(at.getDate())}` +
+    `-${pad2(at.getHours())}${pad2(at.getMinutes())}${pad2(at.getSeconds())}`;
+  return `scopes-${grid}-${stamp}.${formatInfo(format).ext}`;
 }

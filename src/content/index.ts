@@ -521,6 +521,11 @@ function buildController(): void {
       if (!controller) throw new Error('capture: controller not ready');
       return controller.capturePanel(slot, { ...state.capture, ...overrides });
     },
+    /** Export the whole layout as one sheet, exactly like the toolbar button. */
+    captureSheet(overrides?: Partial<CaptureSettings>) {
+      if (!controller) throw new Error('capture: controller not ready');
+      return controller.captureLayout(state.layout, { ...state.capture, ...overrides });
+    },
   };
   controller.onRawError = (msg) => activeHud()?.setNotice(`Raw mode unavailable: ${msg}`);
 }
@@ -688,12 +693,17 @@ function buildHandlers(): HudHandlers {
     onOpenPip() {
       void detachToFloatingWindow();
     },
-    async onCapture(slot: number) {
+    async onCapture(slot?: number) {
       const hud = activeHud();
       if (!hud || !controller) return;
       hud.setNotice(t(state.lang).captureBusy);
       try {
-        const result = await controller.capturePanel(slot, state.capture);
+        // No slot means "export what is on screen": a quad layout yields a 2x2
+        // sheet, triple yields one row of three. A slot narrows it to one panel.
+        const result =
+          slot == null
+            ? await controller.captureLayout(state.layout, state.capture)
+            : await controller.capturePanel(slot, state.capture);
         const url = URL.createObjectURL(result.blob);
         const a = document.createElement('a');
         a.href = url;

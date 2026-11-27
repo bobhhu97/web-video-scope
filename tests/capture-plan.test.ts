@@ -5,11 +5,15 @@ import {
   PANEL_BG,
   PAPER_BG,
   captureFileName,
+  captureGridShape,
+  captureSheetFileName,
   describeSize,
   effectiveBackground,
   formatInfo,
   graticuleThemeFor,
   planCapture,
+  planCaptureLayout,
+  type CaptureLayoutRequest,
   type CapturePlanRequest,
 } from '../src/core/scopes/capture-plan';
 import { WAVE_PAD } from '../src/ui/graticule';
@@ -131,5 +135,121 @@ describe('capture format helpers', () => {
     expect(describeSize(3840, 2160)).toBe('3840 × 2160');
     expect(PANEL_BG).toBe('#0a0e12');
     expect(PAPER_BG).toBe('#ffffff');
+  });
+});
+
+describe('captureGridShape', () => {
+  it('lays triple out as one horizontal row', () => {
+    // On screen triple stacks vertically; the export deliberately goes wide so
+    // three scopes read side by side in a document.
+    expect(captureGridShape('triple')).toEqual({ cols: 3, rows: 1, cells: 3 });
+  });
+
+  it('matches the on-screen arrangement for the other layouts', () => {
+    expect(captureGridShape('single')).toEqual({ cols: 1, rows: 1, cells: 1 });
+    expect(captureGridShape('pair')).toEqual({ cols: 2, rows: 1, cells: 2 });
+    expect(captureGridShape('grid')).toEqual({ cols: 2, rows: 2, cells: 4 });
+  });
+});
+
+function layoutReq(over: Partial<CaptureLayoutRequest> = {}): CaptureLayoutRequest {
+  return {
+    limits: LIMITS,
+    slots: [0, 1],
+    grid: 'pair',
+    cells: [
+      { cssWidth: 480, cssHeight: 270, mode: 'waveform-luma', planes: 1 },
+      { cssWidth: 480, cssHeight: 270, mode: 'histogram', planes: 4 },
+    ],
+    scale: 2,
+    wavePad: WAVE_PAD,
+    gap: 3,
+    ...over,
+  };
+}
+
+describe('planCaptureLayout', () => {
+  it('tiles a pair side by side with a gutter between cells', () => {
+    const plan = planCaptureLayout(layoutReq());
+    expect(plan.cols).toBe(2);
+    expect(plan.rows).toBe(1);
+    expect(plan.cells).toHaveLength(2);
+    const [a, b] = plan.cells;
+    expect(a!.slot).toBe(0);
+    expect(b!.slot).toBe(1);
+    expect(b!.x).toBeGreaterThan(a!.x);
+    expect(a!.y).toBe(b!.y);
+    // The gutter is a scaled gap, so it must be at least one scaled gap wide.
+    expect(b!.x - (a!.x + a!.width)).toBeGreaterThanOrEqual(3 * plan.scale);
+  });
+
+  it('tiles four cells into a 2x2 sheet', () => {
+    const plan = planCaptureLayout(
+      layoutReq({
+        slots: [0, 1, 2, 3],
+        grid: 'grid',
+        cells: [
+          { cssWidth: 480, cssHeight: 270, mode: 'waveform-luma', planes: 1 },
+          { cssWidth: 480, cssHeight: 270, mode: 'waveform-parade', planes: 4 },
+          { cssWidth: 480, cssHeight: 270, mode: 'vectorscope', planes: 1 },
+          { cssWidth: 480, cssHeight: 270, mode: 'cie', planes: 1 },
+        ],
+      }),
+    );
+    expect(plan.cols).toBe(2);
+    expect(plan.rows).toBe(2);
+    expect(plan.cells).toHaveLength(4);
+    expect(plan.cells[0]!.y).toBe(plan.cells[1]!.y);
+    expect(plan.cells[2]!.y).toBeGreaterThan(plan.cells[0]!.y);
+    expect(plan.cells[2]!.x).toBe(plan.cells[0]!.x);
+  });
+
+  it('keeps every cell inside the final canvas', () => {
+    const plan = planCaptureLayout(layoutReq({ grid: 'grid', slots: [0, 1, 2, 3], cells: [
+      { cssWidth: 480, cssHeight: 270, mode: 'waveform-luma', planes: 1 },
+      { cssWidth: 480, cssHeight: 270, mode: 'waveform-luma', planes: 1 },
+      { cssWidth: 480, cssHeight: 270, mode: 'waveform-luma', planes: 1 },
+      { cssWidth: 480, cssHeight: 270, mode: 'waveform-luma', planes: 1 },
+    ] }));
+    for (const cell of plan.cells) {
+      expect(cell.x).toBeGreaterThanOrEqual(0);
+      expect(cell.y).toBeGreaterThanOrEqual(0);
+      expect(cell.x + cell.width).toBeLessThanOrEqual(plan.width);
+      expect(cell.y + cell.height).toBeLessThanOrEqual(plan.height);
+    }
+  });
+
+  it('shrinks the shared scale when the sheet would exceed the density limit', () => {
+    const plan = planCaptureLayout(
+      layoutReq({
+        grid: 'grid',
+        slots: [0, 1, 2, 3],
+        scale: 4,
+        cells: [
+          { cssWidth: 960, cssHeight: 540, mode: 'waveform-parade', planes: 4 },
+          { cssWidth: 960, cssHeight: 540, mode: 'waveform-parade', planes: 4 },
+          { cssWidth: 960, cssHeight: 540, mode: 'waveform-parade', planes: 4 },
+          { cssWidth: 960, cssHeight: 540, mode: 'waveform-parade', planes: 4 },
+        ],
+        limits: { maxEdge: 8192, maxDensityBytes: 32 * 1024 * 1024 },
+      }),
+    );
+    expect(plan.scale).toBeLessThan(4);
+    expect(plan.clamped).toBe(true);
+    expect(plan.requestedScale).toBe(4);
+  });
+
+  it('uses one shared multiplier across cells of different modes', () => {
+    const plan = planCaptureLayout(layoutReq({ scale: 2 }));
+    // The histogram cell caps its own density far lower; the sheet must not
+    // silently give the pair mismatched scales.
+    expect(plan.scale).toBeGreaterThan(0);
+    expect(plan.cells.every((c) => c.width > 0)).toBe(true);
+  });
+
+  it('names sheets after the grid shape', () => {
+    const at = new Date(2026, 0, 2, 3, 4, 5);
+    expect(captureSheetFileName('grid', at, 'png')).toBe('scopes-grid-20260102-030405.png');
+    expect(captureSheetFileName('triple', at, 'jpeg')).toBe('scopes-triple-20260102-030405.jpg');
   });
 });

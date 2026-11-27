@@ -278,7 +278,8 @@ const EN: I18nStrings = {
   bgPanel: 'Panel gray',
   bgTransparent: 'Transparent',
   bgWhite: 'White',
-  captureHint: 'Hold ⇧ or ⌥ and click the camera to capture the active panel.',
+  captureHint:
+    'Click the camera to export the whole layout (2×2 in quad, one row in triple). Hold ⇧ or ⌥ for just the active panel.',
   captureAccuracyHint:
     'Snapshots re-render at a higher multiplier, but detail is capped by the analysis precision. Pick “Full 1:1” to export true per-pixel detail.',
   btnCapture: 'Save snapshot',
@@ -421,7 +422,8 @@ const ZH: I18nStrings = {
   bgPanel: '面板灰底',
   bgTransparent: '透明',
   bgWhite: '白底',
-  captureHint: '按住 ⇧ 或 ⌥ 再点相机按钮，可只截当前选中的面板。',
+  captureHint:
+    '点相机按钮导出当前整个布局（四宫格为 2×2，三宫格为横排一行）；按住 ⇧ 或 ⌥ 只截选中的面板。',
   captureAccuracyHint:
     '截图会以更高倍率重新渲染，但细节上限仍由分析精度决定。想要真实像素级细节，请把精度设为“全分辨率 1:1”。',
   btnCapture: '保存截图',

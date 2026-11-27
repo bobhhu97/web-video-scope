@@ -220,6 +220,102 @@ try {
   });
   check('export reports the analysis dimensions behind it', true, JSON.stringify(limit));
 
+  // ---- 7. Whole-layout export -------------------------------------------
+  // Four cells, each with its own scope. The sheet must be a 2x2 grid whose
+  // total area covers all four, not four copies painted on top of each other.
+  const sheet = await page.evaluate(async () => {
+    const root = document.querySelector('#video-scopes-host').shadowRoot;
+    const cells = [...root.querySelectorAll('.cell')];
+    const r = await window.__scopeDebug.captureSheet({
+      format: 'png', scale: 1, background: 'white',
+    });
+    const bmp = await createImageBitmap(r.blob);
+    const c2d = document.createElement('canvas');
+    c2d.width = bmp.width;
+    c2d.height = bmp.height;
+    const ctx = c2d.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bmp, 0, 0);
+    const { data } = ctx.getImageData(0, 0, bmp.width, bmp.height);
+
+    // Count lit (non-plate) pixels in each quadrant of the sheet.
+    const quad = [0, 0, 0, 0];
+    for (let y = 0; y < bmp.height; y += 1) {
+      const qy = y < bmp.height / 2 ? 0 : 2;
+      for (let x = 0; x < bmp.width; x += 1) {
+        const i = (y * bmp.width + x) * 4;
+        // White plate is (255,255,255); anything meaningfully darker is content.
+        if (data[i] < 235 || data[i + 1] < 235 || data[i + 2] < 235) {
+          quad[qy + (x < bmp.width / 2 ? 0 : 1)] += 1;
+        }
+      }
+    }
+    // Read the dimensions before close(): a closed ImageBitmap reports 0x0.
+    const width = bmp.width;
+    const height = bmp.height;
+    bmp.close();
+    return {
+      cells: cells.length,
+      width,
+      height,
+      quad,
+      fileName: r.fileName,
+      clamped: r.clamped,
+    };
+  });
+  check('exported sheet covers every panel', sheet.cells >= 2, `${sheet.cells} cells`);
+  check('exported sheet is named after the layout', /^scopes-[\w-]+-\d{8}-\d{6}\.png$/.test(sheet.fileName), sheet.fileName);
+  if (sheet.cells >= 4) {
+    // A 2x2 tile of 16:9 cells is itself 16:9. A 1x4 strip would be ~0.44,
+    // so this also catches the layout collapsing into a single column.
+    check('four-up sheet tiles 2x2 at the panel aspect ratio',
+      Math.abs(sheet.width / sheet.height - 16 / 9) < 0.25, `${sheet.width}x${sheet.height}`);
+    check('all four quadrants contain content',
+      sheet.quad.every((n) => n > 200), sheet.quad.join(','));
+  }
+
+  // ---- 8. Triple exports as one wide row --------------------------------
+  // On screen triple stacks vertically; the export deliberately goes wide.
+  // Switch layouts through the layout buttons so this runs the same path a
+  // user would.
+  await page.evaluate(async () => {
+    const root = document.querySelector('#video-scopes-host').shadowRoot;
+    const btn = [...root.querySelectorAll('button[data-layout]')]
+      .find((b) => b.dataset.layout === 'triple');
+    btn?.click();
+    await new Promise((r) => setTimeout(r, 700));
+  });
+  const triple = await page.evaluate(async () => {
+    const r = await window.__scopeDebug.captureSheet({ format: 'png', scale: 1, background: 'white' });
+    const bmp = await createImageBitmap(r.blob);
+    const width = bmp.width;
+    const height = bmp.height;
+    // Sample a horizontal band across the vertical middle: three cells in a
+    // row means content appears at left, centre and right.
+    const c2d = document.createElement('canvas');
+    c2d.width = width;
+    c2d.height = height;
+    const ctx = c2d.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bmp, 0, 0);
+    const band = ctx.getImageData(0, Math.floor(height / 2), width, 1).data;
+    const ink = (from, to) => {
+      let n = 0;
+      for (let x = from; x < to; x++) {
+        const i = x * 4;
+        if (band[i] < 235 || band[i + 1] < 235 || band[i + 2] < 235) n++;
+      }
+      return n;
+    };
+    const third = Math.floor(width / 3);
+    const cols = [ink(0, third), ink(third, third * 2), ink(third * 2, width)];
+    bmp.close();
+    return { width, height, cols, cells: document.querySelector('#video-scopes-host').shadowRoot.querySelectorAll('.cell').length };
+  });
+  check('triple layout exports three cells', triple.cells === 3, `${triple.cells} cells`);
+  check('triple sheet is one wide row, not a vertical stack',
+    triple.width > triple.height, `${triple.width}x${triple.height}`);
+  check('triple sheet has content in all three columns',
+    triple.cols.every((n) => n > 0), triple.cols.join(','));
+
   check('no uncaught errors or WebGPU validation errors', errors.length === 0, errors.join(' | ') || 'clean');
 } finally {
   await browser.close();

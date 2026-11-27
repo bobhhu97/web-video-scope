@@ -169,10 +169,18 @@ already Metal work.
 
 ## Snapshots
 
-The camera button in the header saves the active panel as an image. Unlike a
-screen grab, it does not copy the visible canvas: it re-renders the current
-analysis texture off-screen at the chosen multiplier and repaints the graticule
-on top, so a 4x export is genuinely 4x rather than an upscaled bitmap.
+The camera button in the header saves the current layout as one image: a quad
+layout produces a 2x2 sheet, triple produces a single wide row of three, pair a
+row of two, and single a plain panel. Hold Shift or Alt while clicking to save
+only the active panel instead. Unlike a screen grab, it does not copy the
+visible canvas: every cell is re-rendered from the current analysis texture
+off-screen with its own live settings (mode, channel, zoom, pan, gain, gamma),
+and the graticule is repainted on top, so a 4x export is genuinely 4x rather
+than an upscaled bitmap.
+
+Triple is the one deliberate exception to "what you see is what you get": on
+screen it stacks vertically because that suits a tall narrow panel, but the
+export lays it out as one row so three scopes read side by side in a document.
 
 Choose format, resolution and background in **Settings → Panel Snapshot**:
 

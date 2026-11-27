@@ -29,8 +29,8 @@ import {
   splitP010,
 } from '../gpu/raw-planes';
 import { ExternalVideoSource } from '../gpu/external-source';
-import { renderPanelImage, type CaptureResult } from './scope-exporter';
-import type { CaptureSettings } from '../core/scopes/capture-plan';
+import { renderPanelImage, renderSheetImage, type CaptureResult } from './scope-exporter';
+import type { CaptureGrid, CaptureSettings } from '../core/scopes/capture-plan';
 import DOWNSCALE_WGSL from '../gpu/shaders/downscale.wgsl?raw';
 import DOWNSCALE_EXTERNAL_WGSL from '../gpu/shaders/downscale-external.wgsl?raw';
 import RAW_DOWNSCALE_WGSL from '../gpu/shaders/raw-downscale.wgsl?raw';
@@ -137,6 +137,8 @@ export class ScopeController {
   private p010UvScratch: Uint16Array | null = null;
   private rawDownscaler: Downscaler | null = null;
   private rawPending = false;
+  /** Gutter between sheet cells, in CSS pixels. Mirrors the on-screen grid gap. */
+  captureGap = 3;
   onRawError: ((message: string) => void) | null = null;
 
   constructor(
@@ -278,6 +280,51 @@ export class ScopeController {
       gamuts: this.gamuts(),
       settings,
       sourceWidth: this.lastSampledVideo?.videoWidth,
+    });
+  }
+
+  /**
+   * Capture every live panel into one sheet, laid out like the on-screen grid.
+   *
+   * Cells keep their own renderer options, so each tile reproduces what that
+   * panel currently shows (mode, channel, zoom, pan, gain, gamma). The layout
+   * is taken from the caller because the controller only knows slots, not the
+   * arrangement the HUD is using.
+   */
+  async captureLayout(
+    grid: CaptureGrid,
+    settings: CaptureSettings,
+  ): Promise<CaptureResult> {
+    if (this.destroyed) throw new Error('capture: controller destroyed');
+    const analysis = this.signalMode === 'raw' ? this.rawDownscaler : this.downscaler;
+    if (!analysis) throw new Error('capture: no analysis texture yet');
+
+    const panels = this.targets
+      .map((target) => {
+        const renderer = this.renderers.get(target.slot);
+        return {
+          slot: target.slot,
+          mode: target.mode,
+          options: renderer ? renderer.options : this.optionsFor(target.slot, target.mode),
+          cssWidth: Math.max(1, Math.round(target.gpu.clientWidth)),
+          cssHeight: Math.max(1, Math.round(target.gpu.clientHeight)),
+        };
+      })
+      // Reading order: the sheet tiles row-major, so slot order has to match
+      // the on-screen arrangement rather than map insertion order.
+      .sort((a, b) => a.slot - b.slot);
+
+    if (panels.length === 0) throw new Error('capture: no panels mounted');
+
+    return renderSheetImage({
+      device: await getDevice(),
+      analysis,
+      gamuts: this.gamuts(),
+      settings,
+      grid,
+      panels,
+      sourceWidth: this.lastSampledVideo?.videoWidth,
+      gap: this.captureGap,
     });
   }
 
